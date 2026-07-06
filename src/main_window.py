@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QMessageBox, QInputDialog, QDialog,
 )
 
-from src import data_io, signal_processing, scoring, workbook
+from . import data_io, signal_processing, scoring, workbook
 
 MIN_ZOOM_SPAN_S = 0.050
 LINE_PICK_PIXEL_TOLERANCE = 6
