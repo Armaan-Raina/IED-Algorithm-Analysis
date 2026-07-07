@@ -529,19 +529,13 @@ class MainWindow(QMainWindow):
         # STATE_FLAGGING - check if clicking on event (select, don't auto-validate)
         hit = self._find_preliminary_flag_near_pixel(event.x)
         if hit is not None:
-            self._select_event(hit, "candidate")
-            return
-
-        # Check if clicking on validated event
-        hit = self._find_validated_flag_near_pixel(event.x)
-        if hit is not None:
-            self._select_event(hit, "validated")
-            return
-
-        # Check if clicking on rejected event
-        hit = self._find_rejected_flag_near_pixel(event.x)
-        if hit is not None:
-            self._select_event(hit, "rejected")
+            # Determine what type of event this is
+            if hit in self.validated_events:
+                self._select_event(hit, "validated")
+            elif hit in self.rejected_events:
+                self._select_event(hit, "rejected")
+            else:
+                self._select_event(hit, "candidate")
             return
 
         # Manual flagging
@@ -864,12 +858,18 @@ class MainWindow(QMainWindow):
                     self._reject_preliminary_event(event_time)
                     # Auto-advance to next
                     self.on_next_candidate()
-            elif event.key() == Qt.Key_Right or event.key() == Qt.Key_Down:
-                # Next candidate
-                self.on_next_candidate()
-            elif event.key() == Qt.Key_Left or event.key() == Qt.Key_Up:
-                # Previous candidate
-                self.on_prev_candidate()
+            elif event.key() == Qt.Key_Up or event.key() == Qt.Key_Down:
+                # Navigate between candidates
+                if event.key() == Qt.Key_Down:
+                    self.on_next_candidate()
+                else:
+                    self.on_prev_candidate()
+            elif event.key() == Qt.Key_Right:
+                # Pan right
+                self._pan_x(0.1)
+            elif event.key() == Qt.Key_Left:
+                # Pan left
+                self._pan_x(-0.1)
             elif event.key() == Qt.Key_U:
                 self.on_undo()
             elif event.key() == Qt.Key_F:
@@ -944,9 +944,13 @@ class MainWindow(QMainWindow):
     def _validate_preliminary_event(self, event_time):
         """Move a preliminary event to validated."""
         self._push_undo_state()
+
+        # Change line color from orange to green if it exists
         if event_time in self.preliminary_flags:
-            line = self.preliminary_flags.pop(event_time)
-            line.remove()
+            line = self.preliminary_flags[event_time]
+            line.set_color(VALIDATED_EVENT_COLOR)
+            line.set_linestyle("--")
+
         self.rejected_events.discard(event_time)
         self.manually_flagged_events.discard(event_time)
 
@@ -966,9 +970,13 @@ class MainWindow(QMainWindow):
     def _reject_preliminary_event(self, event_time):
         """Reject a preliminary event."""
         self._push_undo_state()
+
+        # Change line color from orange to red if it exists
         if event_time in self.preliminary_flags:
-            line = self.preliminary_flags.pop(event_time)
-            line.remove()
+            line = self.preliminary_flags[event_time]
+            line.set_color(REJECTED_EVENT_COLOR)
+            line.set_linestyle(":")
+
         self.manually_flagged_events.discard(event_time)
 
         # Add to rejected state
@@ -1082,6 +1090,27 @@ class MainWindow(QMainWindow):
             new_left = self._full_xlim[0]
         if new_right > self._full_xlim[1]:
             new_right = self._full_xlim[1]
+
+        self.ax.set_xlim(new_left, new_right)
+        self.canvas.draw_idle()
+        self._update_sliders()
+
+    def _pan_x(self, fraction):
+        """Pan the x-axis by a fraction of current view width."""
+        xlim = self.ax.get_xlim()
+        span = xlim[1] - xlim[0]
+        pan_amount = span * fraction
+
+        new_left = xlim[0] + pan_amount
+        new_right = xlim[1] + pan_amount
+
+        # Clamp to data limits
+        if new_left < self._full_xlim[0]:
+            new_left = self._full_xlim[0]
+            new_right = new_left + span
+        if new_right > self._full_xlim[1]:
+            new_right = self._full_xlim[1]
+            new_left = new_right - span
 
         self.ax.set_xlim(new_left, new_right)
         self.canvas.draw_idle()
@@ -1225,17 +1254,36 @@ class MainWindow(QMainWindow):
         self.validated_flags = {}
         self.rejected_flags_lines = {}
 
-        # Show ONLY events from the current pool
+        # Show events based on current pool
         if self.pool_view == "candidates":
-            # Show ONLY preliminary candidates (orange)
+            # In candidates pool, show ALL events (candidates + validated + rejected)
+            # This allows seeing validated/rejected lines while navigating candidates
+            all_events = set()
+
+            # Add candidates (orange)
             for event_time in sorted(self._get_candidates()):
                 line = self.ax.axvline(event_time, color=PRELIMINARY_EVENT_COLOR, linestyle=":", linewidth=1.5)
                 self.preliminary_flags[event_time] = line
+                all_events.add(event_time)
+
+            # Add validated (green) - keep their lines visible
+            for event_time in sorted(self.validated_events):
+                line = self.ax.axvline(event_time, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
+                self.preliminary_flags[event_time] = line
+                all_events.add(event_time)
+
+            # Add rejected (red) - keep their lines visible
+            for event_time in sorted(self.rejected_events):
+                line = self.ax.axvline(event_time, color=REJECTED_EVENT_COLOR, linestyle=":", linewidth=1.2)
+                self.preliminary_flags[event_time] = line
+                all_events.add(event_time)
+
         elif self.pool_view == "accepted":
             # Show ONLY validated events (green)
-            for event_time in sorted(self._get_validated()):
+            for event_time in sorted(self.validated_events):
                 line = self.ax.axvline(event_time, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
                 self.validated_flags[event_time] = line
+
         elif self.pool_view == "rejected":
             # Show ONLY rejected events (red)
             for event_time in sorted(self.rejected_events):
@@ -1369,36 +1417,40 @@ class MainWindow(QMainWindow):
         self._push_undo_state()
         # Remove from validated state
         self.validated_events.discard(event_time)
-        # Update candidate list for current pool and redraw
-        self._update_candidate_list_for_pool(self.pool_view)
-        self._redraw_pool_view()
-        # Zoom to first remaining event or reset view
-        if self._candidate_list:
-            self._zoom_to_event(self._candidate_list[0])
-        else:
-            if self._full_xlim is not None:
-                self.ax.set_xlim(*self._full_xlim)
-            if self._full_ylim is not None:
-                self.ax.set_ylim(*self._full_ylim)
-            self.canvas.draw_idle()
+
+        # Change line color back to orange if it exists
+        if event_time in self.preliminary_flags:
+            line = self.preliminary_flags[event_time]
+            line.set_color(PRELIMINARY_EVENT_COLOR)
+            line.set_linestyle(":")
+            # Add back to candidate list
+            if event_time not in self._candidate_list:
+                self._candidate_list.append(event_time)
+                self._candidate_list.sort()
+
+        # Update counter and redraw
+        self._update_candidate_counter()
+        self.canvas.draw_idle()
 
     def _unrejected_event(self, event_time):
         """Unrejected a previously rejected event."""
         self._push_undo_state()
         # Remove from rejected state
         self.rejected_events.discard(event_time)
-        # Update candidate list for current pool and redraw
-        self._update_candidate_list_for_pool(self.pool_view)
-        self._redraw_pool_view()
-        # Zoom to first remaining event or reset view
-        if self._candidate_list:
-            self._zoom_to_event(self._candidate_list[0])
-        else:
-            if self._full_xlim is not None:
-                self.ax.set_xlim(*self._full_xlim)
-            if self._full_ylim is not None:
-                self.ax.set_ylim(*self._full_ylim)
-            self.canvas.draw_idle()
+
+        # Change line color back to orange if it exists
+        if event_time in self.preliminary_flags:
+            line = self.preliminary_flags[event_time]
+            line.set_color(PRELIMINARY_EVENT_COLOR)
+            line.set_linestyle(":")
+            # Add back to candidate list
+            if event_time not in self._candidate_list:
+                self._candidate_list.append(event_time)
+                self._candidate_list.sort()
+
+        # Update counter and redraw
+        self._update_candidate_counter()
+        self.canvas.draw_idle()
 
     def on_toggle_filtered(self, checked):
         """Toggle filtered signal overlay without changing zoom."""
