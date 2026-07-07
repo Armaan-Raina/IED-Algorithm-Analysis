@@ -3,10 +3,10 @@
 import numpy as np
 from scipy.signal import butter, sosfiltfilt, find_peaks
 
-FILTER_LOWPASS_HZ = 300.0
+FILTER_LOWPASS_HZ = 200.0
 FILTER_ORDER = 4
 
-SNAP_HALF_WINDOW_S = 0.050
+SNAP_HALF_WINDOW_S = 0.025
 
 
 def bandpass_filter(signal: np.ndarray, fs: float) -> np.ndarray:
