@@ -24,10 +24,10 @@ STATE_SEIZURE_MARKING = "seizure_marking"
 STATE_FLAGGING = "flagging"
 STATE_DONE = "done"
 
-PRELIMINARY_EVENT_COLOR = "#2ca02c"    # Green (candidates - pending validation)
-VALIDATED_EVENT_COLOR = "#d62728"     # Red (all validated events - same color)
-REJECTED_EVENT_COLOR = "#ff9500"      # Orange (rejected - distinct)
-ALGORITHM_EVENT_COLOR = "#1f77b4"     # Blue
+PRELIMINARY_EVENT_COLOR = "#ff9500"   # Orange (candidates - pending validation)
+VALIDATED_EVENT_COLOR = "#2ca02c"     # Green (all validated events)
+REJECTED_EVENT_COLOR = "#d62728"      # Red (rejected events)
+ALGORITHM_EVENT_COLOR = "#1f77b4"     # Blue (reference)
 SELECTED_EVENT_COLOR = "#ffd700"      # Gold (highlighted when selected)
 
 
@@ -147,6 +147,11 @@ class MainWindow(QMainWindow):
 
         plot_layout.addWidget(self.toolbar)
 
+        # Instruction label (shows context-aware messages)
+        self.instruction_label = QLabel("Load a file to begin")
+        self.instruction_label.setStyleSheet("font-size: 11px; color: #555; padding: 4px 8px;")
+        plot_layout.addWidget(self.instruction_label)
+
         # Plot with axis sliders
         plot_area_layout = QHBoxLayout()
         plot_area_layout.setContentsMargins(0, 0, 0, 0)
@@ -224,6 +229,11 @@ class MainWindow(QMainWindow):
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         self.ax.callbacks.connect("xlim_changed", self.on_xlim_changed)
 
+        # Connect pool view buttons (after instruction_label is created)
+        self.pool_candidates_btn.clicked.connect(lambda: self.on_pool_view_change("candidates"))
+        self.pool_accepted_btn.clicked.connect(lambda: self.on_pool_view_change("accepted"))
+        self.pool_rejected_btn.clicked.connect(lambda: self.on_pool_view_change("rejected"))
+
     def _build_toolbar(self):
         """Build the top toolbar with browse and file info."""
         layout = QHBoxLayout()
@@ -253,17 +263,17 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout()
         layout.setSpacing(6)
 
-        # Candidate navigation buttons (only visible during flagging)
-        self.prev_candidate_btn = QPushButton("◀ Prev\nCandidate")
+        # Event navigation buttons (only visible during flagging)
+        self.prev_candidate_btn = QPushButton("◀ Prev")
         self.prev_candidate_btn.setMinimumHeight(80)
-        self.prev_candidate_btn.setMinimumWidth(120)
+        self.prev_candidate_btn.setMinimumWidth(100)
         self.prev_candidate_btn.clicked.connect(self.on_prev_candidate)
         self.prev_candidate_btn.setVisible(False)
         layout.addWidget(self.prev_candidate_btn)
 
-        self.next_candidate_btn = QPushButton("Next\nCandidate ▶")
+        self.next_candidate_btn = QPushButton("Next ▶")
         self.next_candidate_btn.setMinimumHeight(80)
-        self.next_candidate_btn.setMinimumWidth(120)
+        self.next_candidate_btn.setMinimumWidth(100)
         self.next_candidate_btn.clicked.connect(self.on_next_candidate)
         self.next_candidate_btn.setVisible(False)
         layout.addWidget(self.next_candidate_btn)
@@ -282,7 +292,6 @@ class MainWindow(QMainWindow):
         self.pool_candidates_btn.setMinimumWidth(120)
         self.pool_candidates_btn.setCheckable(True)
         self.pool_candidates_btn.setChecked(True)
-        self.pool_candidates_btn.clicked.connect(lambda: self.on_pool_view_change("candidates"))
         self.pool_candidates_btn.setVisible(False)
         layout.addWidget(self.pool_candidates_btn)
 
@@ -290,7 +299,6 @@ class MainWindow(QMainWindow):
         self.pool_accepted_btn.setMinimumHeight(80)
         self.pool_accepted_btn.setMinimumWidth(120)
         self.pool_accepted_btn.setCheckable(True)
-        self.pool_accepted_btn.clicked.connect(lambda: self.on_pool_view_change("accepted"))
         self.pool_accepted_btn.setVisible(False)
         layout.addWidget(self.pool_accepted_btn)
 
@@ -298,7 +306,6 @@ class MainWindow(QMainWindow):
         self.pool_rejected_btn.setMinimumHeight(80)
         self.pool_rejected_btn.setMinimumWidth(120)
         self.pool_rejected_btn.setCheckable(True)
-        self.pool_rejected_btn.clicked.connect(lambda: self.on_pool_view_change("rejected"))
         self.pool_rejected_btn.setVisible(False)
         layout.addWidget(self.pool_rejected_btn)
 
@@ -818,27 +825,19 @@ class MainWindow(QMainWindow):
         for event_time in self.algo_events:
             self.ax.axvline(event_time, color=ALGORITHM_EVENT_COLOR, linestyle="--", linewidth=0.8, alpha=0.6)
 
-        # Plot preliminary events and build candidate list
+        # Build candidate list and store in preliminary_flags (for tracking)
         self._candidate_list = sorted(self.preliminary_events)
         self._current_candidate_idx = 0
         for event_time in self.preliminary_events:
-            line = self.ax.axvline(
-                event_time, color=PRELIMINARY_EVENT_COLOR, linestyle=":", linewidth=1.5
-            )
-            self.preliminary_flags[event_time] = line
-
-        self.ax.set_xlabel("Time (s)", fontsize=12)
-        self.ax.set_ylabel(f"{self.recording.channel_name.capitalize()} signal ({self.recording.units})", fontsize=12)
-        self.ax.legend(loc="upper right", fontsize=10)
-        self.ax.grid(True, alpha=0.3)
+            self.preliminary_flags[event_time] = None  # Placeholder - actual lines created in _redraw_pool_view
 
         if len(self.t) > 0:
             self._full_xlim = (self.t[0], self.t[-1])
-            self.ax.set_xlim(*self._full_xlim)
         self._full_ylim = self.ax.get_ylim()
         self._full_ycenter = (self._full_ylim[0] + self._full_ylim[1]) / 2
-        self.canvas.draw_idle()
-        self._update_sliders()
+
+        # Draw the pool view (candidates by default)
+        self._redraw_pool_view()
         self._update_candidate_counter()
 
     def keyPressEvent(self, event):
@@ -879,8 +878,14 @@ class MainWindow(QMainWindow):
         """Update flag mode button style."""
         if checked:
             self.flag_btn.setStyleSheet("background-color: #ffe6e6;")
+            # Disable scrollbars when in flag mode
+            self.x_slider.setEnabled(False)
+            self.y_slider.setEnabled(False)
         else:
             self.flag_btn.setStyleSheet("")
+            # Re-enable scrollbars
+            self.x_slider.setEnabled(True)
+            self.y_slider.setEnabled(True)
 
     def on_reset_perspective(self):
         """Reset plot to full view."""
@@ -892,28 +897,42 @@ class MainWindow(QMainWindow):
         self._update_sliders()
 
     def on_validate_selected(self):
-        """Validate the selected event."""
-        if self.selected_event is None:
-            QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
-            return
-        self._validate_preliminary_event(self.selected_event)
-        # Auto-advance to next candidate if in candidates view
-        if self.pool_view == "candidates":
+        """Validate the selected event (or undo validation in accepted pool)."""
+        if self.pool_view == "accepted":
+            # In accepted pool, this button undoes validation
+            if self.selected_event is None:
+                QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
+                return
+            self._unvalidate_event(self.selected_event)
             self.on_next_candidate()
-        else:
             self._redraw_pool_view()
+        else:
+            # In candidates pool, validate
+            if self.selected_event is None:
+                QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
+                return
+            self._validate_preliminary_event(self.selected_event)
+            if self.pool_view == "candidates":
+                self.on_next_candidate()
 
     def on_reject_selected(self):
-        """Reject the selected event."""
-        if self.selected_event is None:
-            QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
-            return
-        self._reject_preliminary_event(self.selected_event)
-        # Auto-advance to next candidate if in candidates view
-        if self.pool_view == "candidates":
+        """Reject the selected event (or undo rejection in rejected pool)."""
+        if self.pool_view == "rejected":
+            # In rejected pool, this button undoes rejection
+            if self.selected_event is None:
+                QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
+                return
+            self._unrejected_event(self.selected_event)
             self.on_next_candidate()
-        else:
             self._redraw_pool_view()
+        else:
+            # In candidates pool, reject
+            if self.selected_event is None:
+                QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
+                return
+            self._reject_preliminary_event(self.selected_event)
+            if self.pool_view == "candidates":
+                self.on_next_candidate()
 
     def _validate_preliminary_event(self, event_time):
         """Move a preliminary event to validated."""
@@ -965,10 +984,10 @@ class MainWindow(QMainWindow):
             self.validated_candidate_flags[t_flag] = line
 
     def _add_manually_flagged(self, t_flag):
-        """Add a manually flagged event."""
-        if t_flag not in self.manually_flagged_flags:
+        """Add a manually flagged event (adds to validated)."""
+        if t_flag not in self.validated_flags:
             line = self.ax.axvline(t_flag, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
-            self.manually_flagged_flags[t_flag] = line
+            self.validated_flags[t_flag] = line
 
     def _remove_validated_flag(self, t_flag):
         """Remove a validated flag."""
@@ -1120,17 +1139,80 @@ class MainWindow(QMainWindow):
         """Change the pool view (candidates, accepted, or rejected)."""
         self.pool_view = pool_type
         self.selected_event = None
+        self.flag_btn.setChecked(False)  # Disable flag mode when switching pools
 
         # Update button states
         self.pool_candidates_btn.setChecked(pool_type == "candidates")
         self.pool_accepted_btn.setChecked(pool_type == "accepted")
         self.pool_rejected_btn.setChecked(pool_type == "rejected")
 
+        # Update button visibility based on pool
+        if pool_type == "candidates":
+            # Full functionality for candidates pool
+            self.flag_btn.setVisible(True)
+            self.validate_btn.setText("✓ Validate\nSelected [V]")
+            self.validate_btn.setVisible(True)
+            self.reject_btn.setText("✗ Reject\nSelected [R]")
+            self.reject_btn.setVisible(True)
+            self.prev_candidate_btn.setVisible(True)
+            self.next_candidate_btn.setVisible(True)
+            self.candidate_counter.setVisible(True)
+            self.x_slider.setEnabled(True)
+            self.y_slider.setEnabled(True)
+            self.toggle_filtered_btn.setVisible(True)
+            self.instruction_label.setText(
+                "Candidates Pool: Click to select, then Validate [V] or Reject [R]. "
+                "Use Prev/Next to navigate. Manual flag with [F] button."
+            )
+        elif pool_type == "accepted":
+            # Review mode for accepted events
+            self.flag_btn.setVisible(False)
+            self.validate_btn.setText("✓ Undo\nValidation [U]")
+            self.validate_btn.setVisible(True)
+            self.reject_btn.setVisible(False)
+            self.prev_candidate_btn.setVisible(True)
+            self.next_candidate_btn.setVisible(True)
+            self.candidate_counter.setVisible(True)
+            self.x_slider.setEnabled(False)
+            self.y_slider.setEnabled(False)
+            self.toggle_filtered_btn.setVisible(True)
+            self.instruction_label.setText(
+                "Accepted Pool: Review validated events. Use Prev/Next to navigate. "
+                "Zoom in/out on each event. Click 'Undo Validation' to revert."
+            )
+            self._update_candidate_list_for_pool("accepted")
+        elif pool_type == "rejected":
+            # Review mode for rejected events
+            self.flag_btn.setVisible(False)
+            self.validate_btn.setVisible(False)
+            self.reject_btn.setText("✓ Undo\nRejection [U]")
+            self.reject_btn.setVisible(True)
+            self.prev_candidate_btn.setVisible(True)
+            self.next_candidate_btn.setVisible(True)
+            self.candidate_counter.setVisible(True)
+            self.x_slider.setEnabled(False)
+            self.y_slider.setEnabled(False)
+            self.toggle_filtered_btn.setVisible(True)
+            self.instruction_label.setText(
+                "Rejected Pool: Review rejected events. Use Prev/Next to navigate. "
+                "Zoom in/out on each event. Click 'Undo Rejection' to revert."
+            )
+            self._update_candidate_list_for_pool("rejected")
+
         # Redraw plot with appropriate events
         self._redraw_pool_view()
 
+    def _update_candidate_list_for_pool(self, pool_type):
+        """Update the candidate list for the given pool."""
+        if pool_type == "accepted":
+            self._candidate_list = sorted(self.validated_flags.keys())
+        elif pool_type == "rejected":
+            self._candidate_list = sorted(self.rejected_flags)
+        self._current_candidate_idx = 0
+        self._update_candidate_counter()
+
     def _redraw_pool_view(self):
-        """Redraw the plot based on current pool view."""
+        """Redraw the plot showing ONLY the selected pool's events."""
         self.ax.clear()
 
         # Always show raw and optionally filtered signal
@@ -1138,38 +1220,50 @@ class MainWindow(QMainWindow):
         if self._show_filtered:
             self.ax.plot(self.t, self.filtered, linewidth=0.6, color="#c44e52", alpha=0.8, label="Filtered (300Hz)")
 
-        # Show events based on pool view
+        # Clear the line dictionaries to redraw
+        self.preliminary_flags = {}
+        self.validated_flags = {}
+
+        # Show ONLY events from the current pool
         if self.pool_view == "candidates":
-            # Show preliminary candidates
-            for event_time in self.preliminary_flags:
-                self.ax.axvline(event_time, color=PRELIMINARY_EVENT_COLOR, linestyle=":", linewidth=1.5)
+            # Show ONLY preliminary candidates (orange)
+            for event_time in sorted(self._get_candidates()):
+                line = self.ax.axvline(event_time, color=PRELIMINARY_EVENT_COLOR, linestyle=":", linewidth=1.5)
+                self.preliminary_flags[event_time] = line
         elif self.pool_view == "accepted":
-            # Show validated events
-            for event_time in self.validated_flags:
+            # Show ONLY validated events (green)
+            for event_time in sorted(self._get_validated()):
                 line = self.ax.axvline(event_time, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
                 self.validated_flags[event_time] = line
         elif self.pool_view == "rejected":
-            # Show rejected events
-            for event_time in self.rejected_flags:
-                self.ax.axvline(event_time, color=REJECTED_EVENT_COLOR, linestyle=":", linewidth=1.2, alpha=0.8)
-
-        # Always show algorithm events as reference
-        for event_time in self.algo_events:
-            self.ax.axvline(event_time, color=ALGORITHM_EVENT_COLOR, linestyle="--", linewidth=0.8, alpha=0.6)
+            # Show ONLY rejected events (red)
+            for event_time in sorted(self.rejected_flags):
+                self.ax.axvline(event_time, color=REJECTED_EVENT_COLOR, linestyle=":", linewidth=1.2)
 
         self.ax.set_xlabel("Time (s)", fontsize=12)
         self.ax.set_ylabel(f"{self.recording.channel_name.capitalize()} signal ({self.recording.units})", fontsize=12)
-        self.ax.legend(loc="upper right", fontsize=10)
         self.ax.grid(True, alpha=0.3)
 
         if len(self.t) > 0:
             self._full_xlim = (self.t[0], self.t[-1])
             self.ax.set_xlim(*self._full_xlim)
+        if hasattr(self, '_full_ylim') and self._full_ylim:
+            self.ax.set_ylim(*self._full_ylim)
         self._full_ylim = self.ax.get_ylim()
-        self._full_ycenter = (self._full_ylim[0] + self._full_ylim[1]) / 2
+        if hasattr(self, '_full_ycenter'):
+            self._full_ycenter = (self._full_ylim[0] + self._full_ylim[1]) / 2
 
         self.canvas.draw_idle()
-        self._update_sliders()
+        if hasattr(self, '_update_sliders'):
+            self._update_sliders()
+
+    def _get_candidates(self):
+        """Get all candidate events (not validated or rejected)."""
+        return set(self.preliminary_events) - set(self.validated_flags.keys()) - self.rejected_flags
+
+    def _get_validated(self):
+        """Get all validated events."""
+        return set(self.validated_flags.keys())
 
     def _select_event(self, event_time, event_type):
         """Select an event for validation/rejection."""
