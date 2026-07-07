@@ -27,6 +27,7 @@ class Recording:
     t: np.ndarray
     raw: np.ndarray
     channel_index: int
+    units: str = "mV"
 
     @property
     def channel_name(self) -> str:
@@ -47,10 +48,31 @@ def load_abf_channel(abf_path: str, channel_index: int) -> Recording:
     t = abf.sweepX.copy()
     fs = float(abf.dataRate)
 
+    # Get units and convert to millivolts if needed
+    units = abf.sweepUnitsY if hasattr(abf, 'sweepUnitsY') else "mV"
+
+    # Always convert to millivolts
+    units = "mV"
+
+    # Detect current units from ABF and convert accordingly
+    if units and "pv" in units.lower():  # Picovolts
+        raw = raw / 1e12 * 1000  # Convert pV to mV
+    elif units and "nv" in units.lower():  # Nanovolts
+        raw = raw / 1e9 * 1000  # Convert nV to mV
+    elif units and "uv" in units.lower():  # Microvolts
+        raw = raw / 1e6 * 1000  # Convert µV to mV
+    elif units and "v" in units.lower() and "mv" not in units.lower():  # Volts (but not mV)
+        raw = raw * 1000  # Convert V to mV
+    else:
+        # Check if data range suggests it's in volts (typical range 0.001-0.1)
+        # while mV should be 1-100
+        if np.max(np.abs(raw)) < 0.2:  # Likely in volts
+            raw = raw * 1000  # Convert V to mV
+
     from pathlib import Path
     file_stem = Path(abf_path).stem
 
-    return Recording(file_stem=file_stem, fs=fs, t=t, raw=raw, channel_index=channel_index)
+    return Recording(file_stem=file_stem, fs=fs, t=t, raw=raw, channel_index=channel_index, units=units)
 
 
 def load_algo_events(csv_path: str, channel_index: int) -> np.ndarray:
