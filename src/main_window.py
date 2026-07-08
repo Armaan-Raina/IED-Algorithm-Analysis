@@ -235,7 +235,7 @@ class MainWindow(QMainWindow):
         """Build the top toolbar with browse and file info."""
         layout = QHBoxLayout()
 
-        self.browse_btn = QPushButton("📁 Browse Files")
+        self.browse_btn = QPushButton("Browse Files")
         self.browse_btn.setMinimumHeight(45)
         self.browse_btn.clicked.connect(self.on_browse_files)
         layout.addWidget(self.browse_btn)
@@ -261,14 +261,14 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
 
         # Event navigation buttons (only visible during flagging)
-        self.prev_candidate_btn = QPushButton("◀ Prev\n[↑]")
+        self.prev_candidate_btn = QPushButton("◀ Prev\n")
         self.prev_candidate_btn.setMinimumHeight(80)
         self.prev_candidate_btn.setMinimumWidth(100)
         self.prev_candidate_btn.clicked.connect(self.on_prev_candidate)
         self.prev_candidate_btn.setVisible(False)
         layout.addWidget(self.prev_candidate_btn)
 
-        self.next_candidate_btn = QPushButton("Next\n[↓] ▶")
+        self.next_candidate_btn = QPushButton("Next\n ▶")
         self.next_candidate_btn.setMinimumHeight(80)
         self.next_candidate_btn.setMinimumWidth(100)
         self.next_candidate_btn.clicked.connect(self.on_next_candidate)
@@ -361,7 +361,7 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(12)
 
-        self.reset_btn = QPushButton("Reset\n[Home]")
+        self.reset_btn = QPushButton("Reset\n[A]")
         self.reset_btn.setMinimumHeight(80)
         self.reset_btn.setMinimumWidth(140)
         self.reset_btn.clicked.connect(self.on_reset_perspective)
@@ -519,7 +519,7 @@ class MainWindow(QMainWindow):
         if self.state == STATE_SEIZURE_MARKING:
             self._seizure_click_pending = True
             self.seizure_mark_btn.setEnabled(True)
-            self.seizure_mark_btn.setText(f"✓ Mark Seizure\nOnset @ {event.xdata:.3f}s")
+            self.seizure_mark_btn.setText(f"Mark Seizure\nOnset @ {event.xdata:.3f}s")
             self._seizure_click_time = event.xdata
 
             # Remove any previous seizure marker line
@@ -532,19 +532,29 @@ class MainWindow(QMainWindow):
             return
 
         # STATE_FLAGGING - check if clicking on event (select, don't auto-validate)
-        hit = self._find_preliminary_flag_near_pixel(event.x)
-        if hit is not None:
-            # Determine what type of event this is
-            if hit in self.validated_events:
-                self._select_event(hit, "validated")
-            elif hit in self.rejected_events:
-                self._select_event(hit, "rejected")
-            else:
+        hit = None
+        if self.pool_view == "candidates":
+            hit = self._find_preliminary_flag_near_pixel(event.x)
+            if hit is not None:
                 self._select_event(hit, "candidate")
+        elif self.pool_view == "accepted":
+            hit = self._find_validated_flag_near_pixel(event.x)
+            if hit is not None:
+                self._select_event(hit, "validated")
+        elif self.pool_view == "rejected":
+            # For rejected pool, check rejected_flags_lines
+            for t_flag in self.rejected_flags_lines:
+                if abs(self._pixel_x(t_flag) - event.x) <= LINE_PICK_PIXEL_TOLERANCE:
+                    hit = t_flag
+                    break
+            if hit is not None:
+                self._select_event(hit, "rejected")
+
+        if hit is not None:
             return
 
-        # Manual flagging
-        if not self.flag_btn.isChecked():
+        # Manual flagging (only in candidates pool)
+        if not self.flag_btn.isChecked() or self.pool_view != "candidates":
             return
 
         self._dragging = True
@@ -785,25 +795,7 @@ class MainWindow(QMainWindow):
         instructions = (
             "STEP 2: EVENT VALIDATION\n\n"
             "Your task: Review and validate IED events\n\n"
-            "EVENT TYPES (shown as different colored vertical lines):\n"
-            "  • GREEN (:) dashed lines = Auto-detected candidates (preliminary)\n"
-            "  • RED (--) dashed lines = Your validated/confirmed IED events\n"
-            "  • BLUE (--) dashed lines = Algorithm pre-detected events (CSV)\n"
-            "  • GRAY (--) dashed lines = Events you rejected as false positives\n\n"
-            "HOW TO VALIDATE EVENTS:\n"
-            "  1. CLICK directly on a GREEN vertical line on the trace\n"
-            "  2. The view will zoom to ±500ms around that event\n"
-            "  3. Decide if it's a real IED:\n"
-            "     • Press V or click 'Validate Selected' if it IS a real IED (turns RED)\n"
-            "     • Press R or click 'Reject Selected' if it's NOT a real IED (turns GRAY)\n\n"
-            "MANUAL FLAGGING:\n"
-            "  • Click 'Flag Event' button (or press F) to enter manual mode\n"
-            "  • Click and drag on the trace to mark new events\n"
-            "  • Click on red lines to remove validated events\n\n"
-            "KEYBOARD SHORTCUTS:\n"
-            "  V = Validate    R = Reject    F = Flag    D = Done\n"
-            "  U = Undo action    W = Withdraw validation/rejection (in pools 2 & 3)\n\n"
-            "When done reviewing all events, press D or click 'Done & Analyze'"
+            "Click H to see a list of hotkeys you might find useful during validation.\n\n"
         )
 
         dlg = InstructionDialog(self, "Event Validation Instructions", instructions)
@@ -836,7 +828,7 @@ class MainWindow(QMainWindow):
         # Store filtered line reference but only show if toggled
         self.filtered_line = self.ax.plot(
             self.t, self.filtered, linewidth=0.6, color="#c44e52", alpha=0.8,
-            label="Filtered (50-100Hz)"
+            label="Filtered (0 - 200 Hz)"
         )[0]
         self.filtered_line.set_visible(self._show_filtered)
 
@@ -916,9 +908,9 @@ class MainWindow(QMainWindow):
                 # Zoom to single event (±500ms)
                 if self._candidate_list and self._current_candidate_idx < len(self._candidate_list):
                     self._zoom_to_event(self._candidate_list[self._current_candidate_idx])
-            elif event.key() == Qt.Key_Z:
-                # Zoom to 1 second
-                self._zoom_to_span(1.0)
+            elif event.key() == Qt.Key_T:
+                # Toggle filtered signal
+                self.toggle_filtered_btn.setChecked(not self.toggle_filtered_btn.isChecked())
             elif event.key() == Qt.Key_H:
                 # Show keyboard shortcuts help
                 self._show_keyboard_help()
@@ -960,13 +952,15 @@ class MainWindow(QMainWindow):
             self.on_next_candidate()
             self._redraw_pool_view()
         else:
-            # In candidates pool, validate (click to select first if multiple visible)
+            # In candidates pool, validate only if zoomed to single event
+            if not self._can_validate_reject():
+                QMessageBox.warning(self, "Zoom Required", "Zoom into a single event before validating.")
+                return
             if self.selected_event is None:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
             self._validate_preliminary_event(self.selected_event)
-            if self.pool_view == "candidates":
-                self.on_next_candidate()
+            self.on_next_candidate()
 
     def on_reject_selected(self):
         """Reject the selected event (or undo rejection in rejected pool)."""
@@ -979,13 +973,15 @@ class MainWindow(QMainWindow):
             self.on_next_candidate()
             self._redraw_pool_view()
         else:
-            # In candidates pool, reject (click to select first if multiple visible)
+            # In candidates pool, reject only if zoomed to single event
+            if not self._can_validate_reject():
+                QMessageBox.warning(self, "Zoom Required", "Zoom into a single event before rejecting.")
+                return
             if self.selected_event is None:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
             self._reject_preliminary_event(self.selected_event)
-            if self.pool_view == "candidates":
-                self.on_next_candidate()
+            self.on_next_candidate()
 
     def _validate_preliminary_event(self, event_time):
         """Move a preliminary event to validated."""
@@ -1214,11 +1210,9 @@ class MainWindow(QMainWindow):
 KEYBOARD SHORTCUTS
 
 Navigation:
-  ↑/↓ . . . . . . . . . . Previous / Next candidate
-  ←/→ . . . . . . . . . . Pan left / Right
-  A . . . . . . . . . . . Zoom Fit All
+  A . . . . . . . . . . . Reset view (fit all)
   S . . . . . . . . . . . Zoom Single Event (±500ms)
-  Z . . . . . . . . . . . Zoom to 1 second
+  T . . . . . . . . . . . Toggle Filtered Signal
 
 Event Actions (Candidates Pool):
   V . . . . . . . . . . . Validate selected event
@@ -1239,13 +1233,6 @@ Pool Switching:
 
 Help:
   H . . . . . . . . . . . Show this help
-
-TIPS:
-• Click on any event to select it, then press V or R
-• Zoom in to single event before using keyboard shortcuts
-• Use arrow keys to navigate quickly between events
-• Press A to see full recording, then click events to validate
-• Use W key in Accepted/Rejected pools to withdraw decisions
         """
         dlg = InstructionDialog(self, "Keyboard Shortcuts", help_text)
         dlg.exec_()
@@ -1347,9 +1334,9 @@ TIPS:
         if pool_type == "candidates":
             # Full functionality for candidates pool
             self.flag_btn.setVisible(True)
-            self.validate_btn.setText("✓ Validate\nSelected [V]")
+            self.validate_btn.setText("Validate\nSelected [V]")
             self.validate_btn.setVisible(True)
-            self.reject_btn.setText("✗ Reject\nSelected [R]")
+            self.reject_btn.setText("Reject\nSelected [R]")
             self.reject_btn.setVisible(True)
             self.prev_candidate_btn.setVisible(True)
             self.next_candidate_btn.setVisible(True)
@@ -1360,8 +1347,9 @@ TIPS:
             self._update_candidate_list_for_pool("candidates")
         elif pool_type == "accepted":
             # Review mode for accepted events
+            self.flag_btn.setChecked(False)  # Ensure flag mode is off
             self.flag_btn.setVisible(False)
-            self.validate_btn.setText("✓ Undo\nValidation [W]")
+            self.validate_btn.setText("Undo\nValidation [W]")
             self.validate_btn.setVisible(True)
             self.reject_btn.setVisible(False)
             self.prev_candidate_btn.setVisible(True)
@@ -1373,9 +1361,10 @@ TIPS:
             self._update_candidate_list_for_pool("accepted")
         elif pool_type == "rejected":
             # Review mode for rejected events
+            self.flag_btn.setChecked(False)  # Ensure flag mode is off
             self.flag_btn.setVisible(False)
             self.validate_btn.setVisible(False)
-            self.reject_btn.setText("✓ Undo\nRejection [W]")
+            self.reject_btn.setText("Undo\nRejection [W]")
             self.reject_btn.setVisible(True)
             self.prev_candidate_btn.setVisible(True)
             self.next_candidate_btn.setVisible(True)
@@ -1673,11 +1662,11 @@ TIPS:
             elif color == "#c44e52":
                 line.set_visible(self._show_filtered)
 
-        # Update button label
+        # Update button label with keyboard shortcut preserved
         if self._show_filtered:
-            self.toggle_filtered_btn.setText("📊 Hide\nFiltered Signal")
+            self.toggle_filtered_btn.setText("Hide\nFiltered [T]")
         else:
-            self.toggle_filtered_btn.setText("📊 Show\nFiltered Signal")
+            self.toggle_filtered_btn.setText("Show\nFiltered [T]")
 
         self.canvas.draw_idle()
 

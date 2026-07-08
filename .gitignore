@@ -222,3 +222,6 @@ tests/
 
 # Data
 data/
+
+#json files
+*.json
