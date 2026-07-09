@@ -97,10 +97,20 @@ class MainWindow(QMainWindow):
         self.state = STATE_IDLE
         self.validated_flags = {}          # time_s -> Line2D (all validated events)
         self.preliminary_flags = {}        # time_s -> Line2D (auto-detected candidates)
-        self.rejected_flags = set()        # set of rejected preliminary event times
+        self.rejected_flags_lines = {}     # time_s -> Line2D (rejected events)
         self.undo_stack = []               # for undo functionality
         self.selected_event = None         # currently selected event for validation/rejection
-        self.pool_view = "candidates"      # current pool view: "candidates", "accepted", or "rejected"
+        self.pool_view = "candidates"      # current pool view: always "candidates" with overlay toggles
+
+        # Event state persistence
+        self.validated_events = set()      # validated event times (persistent)
+        self.rejected_events = set()       # rejected event times (persistent)
+        self.manually_flagged_events = set() # manually flagged events (persistent)
+
+        # Overlay toggle states
+        self.show_candidate_lines = True   # show orange candidate lines
+        self.show_validated_lines = True   # show green validated lines
+        self.show_rejected_lines = True    # show red rejected lines
 
         # UI state
         self._full_xlim = None
@@ -144,7 +154,8 @@ class MainWindow(QMainWindow):
                     self.flag_btn, self.validate_btn, self.reject_btn, self.reset_btn,
                     self.undo_btn, self.done_btn, self.toggle_filtered_btn,
                     self.prev_candidate_btn, self.next_candidate_btn,
-                    self.pool_candidates_btn, self.pool_accepted_btn, self.pool_rejected_btn]:
+                    self.toggle_candidates_btn, self.toggle_validated_btn, self.toggle_rejected_btn,
+                    self.view_validated_btn]:
             btn.setStyleSheet(button_style)
 
     def _build_ui(self):
@@ -224,10 +235,7 @@ class MainWindow(QMainWindow):
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
         self.ax.callbacks.connect("xlim_changed", self.on_xlim_changed)
 
-        # Connect pool view buttons (after instruction_label is created)
-        self.pool_candidates_btn.clicked.connect(lambda: self.on_pool_view_change("candidates"))
-        self.pool_accepted_btn.clicked.connect(lambda: self.on_pool_view_change("accepted"))
-        self.pool_rejected_btn.clicked.connect(lambda: self.on_pool_view_change("rejected"))
+        # Pool view buttons removed; using toggles instead
 
         # Apply button styling
         self._apply_button_styles()
@@ -284,28 +292,40 @@ class MainWindow(QMainWindow):
 
         layout.addSpacing(12)
 
-        # Pool view toggle buttons
-        self.pool_candidates_btn = QPushButton("Candidates\n[1]")
-        self.pool_candidates_btn.setMinimumHeight(80)
-        self.pool_candidates_btn.setMinimumWidth(120)
-        self.pool_candidates_btn.setCheckable(True)
-        self.pool_candidates_btn.setChecked(True)
-        self.pool_candidates_btn.setVisible(False)
-        layout.addWidget(self.pool_candidates_btn)
+        # Event overlay toggle buttons
+        self.toggle_candidates_btn = QPushButton("Show\nCandidates")
+        self.toggle_candidates_btn.setMinimumHeight(80)
+        self.toggle_candidates_btn.setMinimumWidth(120)
+        self.toggle_candidates_btn.setCheckable(True)
+        self.toggle_candidates_btn.setChecked(True)
+        self.toggle_candidates_btn.setVisible(False)
+        self.toggle_candidates_btn.toggled.connect(self.on_toggle_candidates_overlay)
+        layout.addWidget(self.toggle_candidates_btn)
 
-        self.pool_accepted_btn = QPushButton("Validated\n[2]")
-        self.pool_accepted_btn.setMinimumHeight(80)
-        self.pool_accepted_btn.setMinimumWidth(120)
-        self.pool_accepted_btn.setCheckable(True)
-        self.pool_accepted_btn.setVisible(False)
-        layout.addWidget(self.pool_accepted_btn)
+        self.toggle_validated_btn = QPushButton("Show\nValidated")
+        self.toggle_validated_btn.setMinimumHeight(80)
+        self.toggle_validated_btn.setMinimumWidth(120)
+        self.toggle_validated_btn.setCheckable(True)
+        self.toggle_validated_btn.setChecked(True)
+        self.toggle_validated_btn.setVisible(False)
+        self.toggle_validated_btn.toggled.connect(self.on_toggle_validated_overlay)
+        layout.addWidget(self.toggle_validated_btn)
 
-        self.pool_rejected_btn = QPushButton("Rejected\n[3]")
-        self.pool_rejected_btn.setMinimumHeight(80)
-        self.pool_rejected_btn.setMinimumWidth(120)
-        self.pool_rejected_btn.setCheckable(True)
-        self.pool_rejected_btn.setVisible(False)
-        layout.addWidget(self.pool_rejected_btn)
+        self.toggle_rejected_btn = QPushButton("Show\nRejected")
+        self.toggle_rejected_btn.setMinimumHeight(80)
+        self.toggle_rejected_btn.setMinimumWidth(120)
+        self.toggle_rejected_btn.setCheckable(True)
+        self.toggle_rejected_btn.setChecked(True)
+        self.toggle_rejected_btn.setVisible(False)
+        self.toggle_rejected_btn.toggled.connect(self.on_toggle_rejected_overlay)
+        layout.addWidget(self.toggle_rejected_btn)
+
+        self.view_validated_btn = QPushButton("View Validated\nOverlay [2]")
+        self.view_validated_btn.setMinimumHeight(80)
+        self.view_validated_btn.setMinimumWidth(120)
+        self.view_validated_btn.setVisible(False)
+        self.view_validated_btn.clicked.connect(self.on_view_validated_overlay)
+        layout.addWidget(self.view_validated_btn)
 
         layout.addSpacing(12)
 
@@ -533,28 +553,25 @@ class MainWindow(QMainWindow):
 
         # STATE_FLAGGING - check if clicking on event (select, don't auto-validate)
         hit = None
-        if self.pool_view == "candidates":
-            hit = self._find_preliminary_flag_near_pixel(event.x)
-            if hit is not None:
-                self._select_event(hit, "candidate")
-        elif self.pool_view == "accepted":
+
+        # Try to find any event near the click point (candidates, validated, or rejected)
+        hit = self._find_preliminary_flag_near_pixel(event.x)
+        if hit is not None:
+            self._select_event(hit, "candidate")
+        else:
             hit = self._find_validated_flag_near_pixel(event.x)
             if hit is not None:
                 self._select_event(hit, "validated")
-        elif self.pool_view == "rejected":
-            # For rejected pool, check rejected_flags_lines
-            for t_flag in self.rejected_flags_lines:
-                if abs(self._pixel_x(t_flag) - event.x) <= LINE_PICK_PIXEL_TOLERANCE:
-                    hit = t_flag
-                    break
-            if hit is not None:
-                self._select_event(hit, "rejected")
+            else:
+                hit = self._find_rejected_flag_near_pixel(event.x)
+                if hit is not None:
+                    self._select_event(hit, "rejected")
 
         if hit is not None:
             return
 
-        # Manual flagging (only in candidates pool)
-        if not self.flag_btn.isChecked() or self.pool_view != "candidates":
+        # Manual flagging (only when flag mode is on)
+        if not self.flag_btn.isChecked():
             return
 
         self._dragging = True
@@ -794,9 +811,10 @@ class MainWindow(QMainWindow):
         self.prev_candidate_btn.setVisible(True)
         self.next_candidate_btn.setVisible(True)
         self.candidate_counter.setVisible(True)
-        self.pool_candidates_btn.setVisible(True)
-        self.pool_accepted_btn.setVisible(True)
-        self.pool_rejected_btn.setVisible(True)
+        self.toggle_candidates_btn.setVisible(True)
+        self.toggle_validated_btn.setVisible(True)
+        self.toggle_rejected_btn.setVisible(True)
+        self.view_validated_btn.setVisible(True)
 
         # Reset filtered signal toggle
         self._show_filtered = False
@@ -831,8 +849,6 @@ class MainWindow(QMainWindow):
         # Draw the pool view (candidates by default)
         self._redraw_pool_view()
         self._update_candidate_counter()
-        self._update_pool_button_styles()
-        self._update_button_states()
 
         # Set focus to canvas so keyboard events reach keyPressEvent
         self.canvas.setFocus()
@@ -860,30 +876,15 @@ class MainWindow(QMainWindow):
             elif event.key() == Qt.Key_U:
                 self.on_undo()
                 handled = True
-            elif event.key() == Qt.Key_W:
-                # Withdraw (undo) validation/rejection in accepted/rejected pools
-                if self.pool_view == "accepted":
-                    self.on_validate_selected()
-                elif self.pool_view == "rejected":
-                    self.on_reject_selected()
-                handled = True
             elif event.key() == Qt.Key_F:
                 self.flag_btn.setChecked(not self.flag_btn.isChecked())
                 handled = True
             elif event.key() == Qt.Key_D:
                 self.on_done_clicked()
                 handled = True
-            elif event.key() == Qt.Key_1:
-                # Switch to candidates pool
-                self.on_pool_view_change("candidates")
-                handled = True
             elif event.key() == Qt.Key_2:
-                # Switch to accepted pool
-                self.on_pool_view_change("accepted")
-                handled = True
-            elif event.key() == Qt.Key_3:
-                # Switch to rejected pool
-                self.on_pool_view_change("rejected")
+                # Open validated events overlay window
+                self.on_view_validated_overlay()
                 handled = True
             elif event.key() == Qt.Key_A:
                 # Zoom fit all
@@ -938,40 +939,42 @@ class MainWindow(QMainWindow):
         self._update_sliders()
 
     def on_validate_selected(self):
-        """Validate the selected event (or undo validation in accepted pool)."""
-        if self.pool_view == "accepted":
-            # In accepted pool, this button undoes validation
-            if self.selected_event is None:
+        """Validate the selected event (or auto-select if only 1 visible)."""
+        # In candidates pool, validate
+        if self.selected_event is None:
+            # Check if only one candidate is visible on screen
+            xlim = self.ax.get_xlim()
+            visible_candidates = [t for t in self._get_candidates() if xlim[0] <= t <= xlim[1]]
+
+            if len(visible_candidates) == 1:
+                # Auto-select the only visible event
+                self.selected_event = visible_candidates[0]
+            else:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
-            self._unvalidate_event(self.selected_event)
-            self._redraw_pool_view()
-        else:
-            # In candidates pool, must have an event selected
-            if self.selected_event is None:
-                QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
-                return
-            self._validate_preliminary_event(self.selected_event)
-            self.selected_event = None
-            self._redraw_pool_view()
+
+        self._validate_preliminary_event(self.selected_event)
+        self.selected_event = None
+        self._redraw_pool_view()
 
     def on_reject_selected(self):
-        """Reject the selected event (or undo rejection in rejected pool)."""
-        if self.pool_view == "rejected":
-            # In rejected pool, this button undoes rejection
-            if self.selected_event is None:
+        """Reject the selected event (or auto-select if only 1 visible)."""
+        # In candidates pool, reject
+        if self.selected_event is None:
+            # Check if only one candidate is visible on screen
+            xlim = self.ax.get_xlim()
+            visible_candidates = [t for t in self._get_candidates() if xlim[0] <= t <= xlim[1]]
+
+            if len(visible_candidates) == 1:
+                # Auto-select the only visible event
+                self.selected_event = visible_candidates[0]
+            else:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
-            self._unrejected_event(self.selected_event)
-            self._redraw_pool_view()
-        else:
-            # In candidates pool, must have an event selected
-            if self.selected_event is None:
-                QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
-                return
-            self._reject_preliminary_event(self.selected_event)
-            self.selected_event = None
-            self._redraw_pool_view()
+
+        self._reject_preliminary_event(self.selected_event)
+        self.selected_event = None
+        self._redraw_pool_view()
 
     def _validate_preliminary_event(self, event_time):
         """Move a preliminary event to validated."""
@@ -1258,8 +1261,10 @@ Help:
         self.rejected_events = undo_state["rejected"].copy()
         self.manually_flagged_events = undo_state["manually_flagged"].copy()
 
-        # Update display
-        self._update_candidate_list_for_pool(self.pool_view)
+        # Update candidate list and display
+        self._candidate_list = sorted(self._get_candidates())
+        self._current_candidate_idx = 0
+        self._update_candidate_counter()
         self._redraw_pool_view()
         self.selected_event = None
 
@@ -1275,124 +1280,16 @@ Help:
         if len(self.undo_stack) > 20:
             self.undo_stack.pop(0)
 
-    def on_pool_view_change(self, pool_type):
-        """Change the pool view (candidates, accepted, or rejected)."""
-        self.pool_view = pool_type
-        self.selected_event = None
-        self.flag_btn.setChecked(False)  # Disable flag mode when switching pools
-
-        # Update button states
-        self.pool_candidates_btn.setChecked(pool_type == "candidates")
-        self.pool_accepted_btn.setChecked(pool_type == "accepted")
-        self.pool_rejected_btn.setChecked(pool_type == "rejected")
-
-        # Update visual styling to highlight active pool
-        self._update_pool_button_styles()
-        self._update_button_states()
-
-        # Update button visibility based on pool
-        if pool_type == "candidates":
-            # Full functionality for candidates pool
-            self.flag_btn.setVisible(True)
-            self.validate_btn.setText("Validate\nSelected [V]")
-            self.validate_btn.setVisible(True)
-            self.reject_btn.setText("Reject\nSelected [R]")
-            self.reject_btn.setVisible(True)
-            self.prev_candidate_btn.setVisible(True)
-            self.next_candidate_btn.setVisible(True)
-            self.candidate_counter.setVisible(True)
-            self.y_slider.setEnabled(True)
-            self.toggle_filtered_btn.setVisible(True)
-            self._update_candidate_list_for_pool("candidates")
-        elif pool_type == "accepted":
-            # Review mode for accepted events - show all superimposed
-            self.flag_btn.setChecked(False)  # Ensure flag mode is off
-            self.flag_btn.setVisible(False)
-            self.validate_btn.setText("Undo\nValidation [W]")
-            self.validate_btn.setVisible(True)
-            self.reject_btn.setVisible(False)
-            self.prev_candidate_btn.setVisible(False)  # Hide navigation - showing all events
-            self.next_candidate_btn.setVisible(False)
-            self.candidate_counter.setVisible(False)
-            self.y_slider.setEnabled(True)
-            self.toggle_filtered_btn.setVisible(True)
-            self._update_candidate_list_for_pool("accepted")
-        elif pool_type == "rejected":
-            # Review mode for rejected events - show all superimposed
-            self.flag_btn.setChecked(False)  # Ensure flag mode is off
-            self.flag_btn.setVisible(False)
-            self.validate_btn.setVisible(False)
-            self.reject_btn.setText("Undo\nRejection [W]")
-            self.reject_btn.setVisible(True)
-            self.prev_candidate_btn.setVisible(False)  # Hide navigation - showing all events
-            self.next_candidate_btn.setVisible(False)
-            self.candidate_counter.setVisible(False)
-            self.y_slider.setEnabled(True)
-            self.toggle_filtered_btn.setVisible(True)
-            self._update_candidate_list_for_pool("rejected")
-
-        # Redraw plot with appropriate events
-        self._redraw_pool_view()
-
-        # For candidates pool, zoom to first event; for accepted/rejected, show all
-        if pool_type == "candidates" and self._candidate_list:
-            self._zoom_to_event(self._candidate_list[0])
-        else:
-            # Show full view for accepted/rejected pools or if no candidates
-            if self._full_xlim is not None:
-                self.ax.set_xlim(*self._full_xlim)
-            if self._full_ylim is not None:
-                self.ax.set_ylim(*self._full_ylim)
-            self.canvas.draw_idle()
-            self._update_sliders()
-
-    def _update_candidate_list_for_pool(self, pool_type):
-        """Update the candidate list for the given pool."""
-        if pool_type == "candidates":
-            self._candidate_list = sorted(self._get_candidates())
-        elif pool_type == "accepted":
-            self._candidate_list = sorted(self.validated_events)
-        elif pool_type == "rejected":
-            self._candidate_list = sorted(self.rejected_events)
-        self._current_candidate_idx = 0
-        self._update_candidate_counter()
-
-    def _update_pool_button_styles(self):
-        """Update pool button visual styling to show active pool."""
-        active_style = "font-weight: bold; border: 2px solid #0078d4; background-color: #e6f0ff;"
-        inactive_style = ""
-
-        if self.pool_view == "candidates":
-            self.pool_candidates_btn.setStyleSheet(active_style)
-            self.pool_accepted_btn.setStyleSheet(inactive_style)
-            self.pool_rejected_btn.setStyleSheet(inactive_style)
-        elif self.pool_view == "accepted":
-            self.pool_candidates_btn.setStyleSheet(inactive_style)
-            self.pool_accepted_btn.setStyleSheet(active_style)
-            self.pool_rejected_btn.setStyleSheet(inactive_style)
-        elif self.pool_view == "rejected":
-            self.pool_candidates_btn.setStyleSheet(inactive_style)
-            self.pool_accepted_btn.setStyleSheet(inactive_style)
-            self.pool_rejected_btn.setStyleSheet(active_style)
-
-    def _update_button_states(self):
-        """Update button enabled/disabled states based on context."""
-        # Flag button only enabled in candidates pool
-        self.flag_btn.setEnabled(self.pool_view == "candidates")
-
-        # Validate button: enabled in candidates (for validation) and accepted (for undo)
-        self.validate_btn.setEnabled(self.pool_view in ("candidates", "accepted"))
-
-        # Reject button: enabled in candidates (for rejection) and rejected (for undo)
-        self.reject_btn.setEnabled(self.pool_view in ("candidates", "rejected"))
-
-        # Pool buttons: disable the current pool button
-        self.pool_candidates_btn.setEnabled(self.pool_view != "candidates")
-        self.pool_accepted_btn.setEnabled(self.pool_view != "accepted")
-        self.pool_rejected_btn.setEnabled(self.pool_view != "rejected")
+    def _get_candidates(self):
+        """Get all preliminary events that haven't been validated or rejected."""
+        candidates = set(self.preliminary_events) if self.preliminary_events is not None and len(self.preliminary_events) > 0 else set()
+        candidates.update(self.manually_flagged_events)
+        candidates -= self.validated_events
+        candidates -= self.rejected_events
+        return candidates
 
     def _redraw_pool_view(self):
-        """Redraw event lines for current pool view."""
+        """Redraw event lines based on toggle visibility states."""
         # Remove old event lines (keep signal lines)
         lines_to_remove = []
         for line in self.ax.get_lines():
@@ -1409,38 +1306,20 @@ Help:
         self.validated_flags = {}
         self.rejected_flags_lines = {}
 
-        # Show events based on current pool
-        if self.pool_view == "candidates":
-            # In candidates pool, show ALL events (candidates + validated + rejected)
-            # This allows seeing validated/rejected lines while navigating candidates
-            all_events = set()
-
-            # Add candidates (orange)
+        # Add candidates (orange) if toggle is on
+        if self.show_candidate_lines:
             for event_time in sorted(self._get_candidates()):
                 line = self.ax.axvline(event_time, color=PRELIMINARY_EVENT_COLOR, linestyle="--", linewidth=1.5)
                 self.preliminary_flags[event_time] = line
-                all_events.add(event_time)
 
-            # Add validated (green) - keep their lines visible
-            for event_time in sorted(self.validated_events):
-                line = self.ax.axvline(event_time, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
-                self.preliminary_flags[event_time] = line
-                all_events.add(event_time)
-
-            # Add rejected (red) - keep their lines visible
-            for event_time in sorted(self.rejected_events):
-                line = self.ax.axvline(event_time, color=REJECTED_EVENT_COLOR, linestyle="--", linewidth=1.5)
-                self.preliminary_flags[event_time] = line
-                all_events.add(event_time)
-
-        elif self.pool_view == "accepted":
-            # Show ONLY validated events (green)
+        # Add validated (green) if toggle is on
+        if self.show_validated_lines:
             for event_time in sorted(self.validated_events):
                 line = self.ax.axvline(event_time, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
                 self.validated_flags[event_time] = line
 
-        elif self.pool_view == "rejected":
-            # Show ONLY rejected events (red)
+        # Add rejected (red) if toggle is on
+        if self.show_rejected_lines:
             for event_time in sorted(self.rejected_events):
                 line = self.ax.axvline(event_time, color=REJECTED_EVENT_COLOR, linestyle="--", linewidth=1.5)
                 self.rejected_flags_lines[event_time] = line
@@ -1451,14 +1330,6 @@ Help:
         self.canvas.draw_idle()
         if hasattr(self, '_update_sliders'):
             self._update_sliders()
-
-    def _get_candidates(self):
-        """Get all candidate events (not validated or rejected)."""
-        # Include both auto-detected and manually flagged events
-        auto_detected = set(self.preliminary_events) if self.preliminary_events is not None else set()
-        manually_flagged = self.manually_flagged_events.copy()
-        all_candidates = auto_detected | manually_flagged
-        return all_candidates - self.validated_events - self.rejected_events
 
     def _get_validated(self):
         """Get all validated events."""
@@ -1626,6 +1497,81 @@ Help:
             self.toggle_filtered_btn.setText("Show\nFiltered [T]")
 
         self.canvas.draw_idle()
+
+    def on_toggle_candidates_overlay(self, checked):
+        """Toggle visibility of candidate event lines."""
+        self.show_candidate_lines = checked
+        self._redraw_pool_view()
+
+    def on_toggle_validated_overlay(self, checked):
+        """Toggle visibility of validated event lines."""
+        self.show_validated_lines = checked
+        self._redraw_pool_view()
+
+    def on_toggle_rejected_overlay(self, checked):
+        """Toggle visibility of rejected event lines."""
+        self.show_rejected_lines = checked
+        self._redraw_pool_view()
+
+    def on_view_validated_overlay(self):
+        """Open a separate window showing all validated events overlaid on same axis."""
+        if not self.validated_events:
+            QMessageBox.information(self, "No Validated Events", "No validated events to display yet.")
+            return
+
+        # Create a new window for the validated events overlay
+        overlay_window = QDialog(self)
+        overlay_window.setWindowTitle("Validated Events Overlay")
+        overlay_window.resize(1000, 600)
+
+        layout = QVBoxLayout(overlay_window)
+
+        # Create figure for the overlay plot
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        fig = Figure(figsize=(10, 6))
+        ax = fig.add_subplot(111)
+        canvas = FigureCanvasQTAgg(fig)
+
+        # Plot all validated events overlaid exactly on top of each other
+        validated_times = sorted(self.validated_events)
+        context_window = 0.2  # ±200ms = 400ms total
+
+        for event_time in validated_times:
+            # Extract waveform from -200ms to +200ms around event
+            left_time = event_time - context_window
+            right_time = event_time + context_window
+
+            # Find indices in data
+            left_idx = np.searchsorted(self.t, left_time)
+            right_idx = np.searchsorted(self.t, right_time)
+
+            if left_idx >= right_idx:
+                continue
+
+            # Extract the window and align to event time (0)
+            t_window = self.t[left_idx:right_idx] - event_time
+            raw_window = self.raw[left_idx:right_idx]
+
+            # Plot on the same axis with transparency so you can see overlaps
+            ax.plot(t_window, raw_window, linewidth=1, alpha=0.6)
+
+        # Mark the event center
+        ax.axvline(0, color='red', linestyle='--', linewidth=2, alpha=0.8, label='Event center')
+
+        ax.set_xlabel("Time relative to event (s)", fontsize=12)
+        ax.set_ylabel("Signal amplitude", fontsize=12)
+        ax.set_title(f"All {len(validated_times)} Validated Events Overlaid (±200ms)", fontsize=14)
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=10)
+
+        layout.addWidget(canvas)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(overlay_window.close)
+        layout.addWidget(close_btn)
+
+        overlay_window.exec_()
 
     def on_next_candidate(self):
         """Jump to next preliminary candidate."""
