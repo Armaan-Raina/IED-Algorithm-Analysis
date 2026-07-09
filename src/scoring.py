@@ -1,8 +1,13 @@
 """Ground-truth vs. algorithm event matching and performance metrics.
 
-IED detection is a point-event task, so there is no well-defined "true negative"
-window; specificity is therefore not computed. Only TP / FP / FN and sensitivity
-are reported.
+Metrics:
+- TP: Validated events matched to algorithm events
+- FP: Algorithm events not matched to validated events
+- FN: Validated events not matched to algorithm events
+- TN: Rejected events not matched to algorithm events (correct rejections)
+
+Sensitivity = TP / (TP + FN)
+Specificity = TN / (TN + FP_rejected) where FP_rejected = rejected events with algorithm matches
 """
 
 from dataclasses import dataclass, field
@@ -15,6 +20,8 @@ class ScoringResult:
     tp_pairs: list = field(default_factory=list)   # list of (gt_time_s, algo_time_s)
     fn_times: list = field(default_factory=list)    # unmatched ground-truth events
     fp_times: list = field(default_factory=list)    # unmatched algorithm events
+    tn: int = 0                                       # rejected events not matched to algo
+    fp_rejected: int = 0                              # rejected events matched to algo (false positives)
 
     @property
     def tp(self) -> int:
@@ -33,13 +40,27 @@ class ScoringResult:
         denom = self.tp + self.fn
         return (self.tp / denom) if denom > 0 else None
 
+    @property
+    def specificity(self):
+        denom = self.tn + self.fp_rejected
+        return (self.tn / denom) if denom > 0 else None
 
-def score_events(gt_times, algo_times, tolerance_s: float = MATCH_TOLERANCE_S) -> ScoringResult:
+
+def score_events(gt_times, algo_times, tolerance_s: float = MATCH_TOLERANCE_S, rejected_times=None) -> ScoringResult:
     """Greedy nearest-neighbor one-to-one matching between ground-truth (manual)
-    and algorithm event timestamps within +/- tolerance_s."""
+    and algorithm event timestamps within +/- tolerance_s.
+
+    Args:
+        gt_times: Validated event times (ground truth / true events)
+        algo_times: Algorithm-detected event times
+        tolerance_s: Matching tolerance in seconds
+        rejected_times: Rejected event times (not true IEDs)
+    """
     gt_times = sorted(gt_times)
     algo_times = sorted(algo_times)
+    rejected_times = sorted(rejected_times) if rejected_times else []
 
+    # Match validated events to algorithm events
     candidates = []
     for gi, gt in enumerate(gt_times):
         for ai, at in enumerate(algo_times):
@@ -62,4 +83,35 @@ def score_events(gt_times, algo_times, tolerance_s: float = MATCH_TOLERANCE_S) -
     fn_times = [gt_times[i] for i in range(len(gt_times)) if i not in matched_gt]
     fp_times = [algo_times[i] for i in range(len(algo_times)) if i not in matched_algo]
 
-    return ScoringResult(tp_pairs=tp_pairs, fn_times=fn_times, fp_times=fp_times)
+    # Count true negatives (rejected events not matched to algorithm)
+    # and false positives from rejected events (algorithm detected something rejected)
+    tn_count = 0
+    fp_rejected_count = 0
+
+    for ri, rejected_time in enumerate(rejected_times):
+        matched = False
+        for ai, algo_time in enumerate(algo_times):
+            if abs(rejected_time - algo_time) <= tolerance_s and ai in matched_algo:
+                # This rejected event was matched to an algo event (FP from algo perspective)
+                fp_rejected_count += 1
+                matched = True
+                break
+            elif abs(rejected_time - algo_time) <= tolerance_s and ai not in matched_algo:
+                # This rejected event has a nearby algo event but it's not matched yet
+                # Mark as matched to avoid double-counting
+                matched_algo.add(ai)
+                fp_rejected_count += 1
+                matched = True
+                break
+
+        if not matched:
+            # Rejected event with no nearby algorithm event (true negative)
+            tn_count += 1
+
+    return ScoringResult(
+        tp_pairs=tp_pairs,
+        fn_times=fn_times,
+        fp_times=fp_times,
+        tn=tn_count,
+        fp_rejected=fp_rejected_count
+    )

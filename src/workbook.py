@@ -27,6 +27,9 @@ class FileResult:
     fn: int
     sensitivity: Optional[float]
     tp_pairs: list  # list of (gt_time_s, algo_time_s)
+    tn: int = 0  # true negatives (rejected events not detected by algo)
+    fp_rejected: int = 0  # false positives from rejected events (algo detected something rejected)
+    specificity: Optional[float] = None
 
 
 def sheet_name_for(result: FileResult) -> str:
@@ -63,7 +66,10 @@ def write_file_sheet(wb: Workbook, result: FileResult) -> str:
         ("TP", result.tp),
         ("FP", result.fp),
         ("FN", result.fn),
+        ("TN (Rejected & Not Detected)", result.tn),
+        ("FP from Rejected", result.fp_rejected),
         ("Sensitivity", result.sensitivity if result.sensitivity is not None else "N/A"),
+        ("Specificity", result.specificity if result.specificity is not None else "N/A"),
     ]
     for i, (label, value) in enumerate(rows, start=1):
         ws.cell(row=i, column=1, value=label)
@@ -92,20 +98,26 @@ def update_summary_sheet(wb: Workbook) -> None:
 
     recording_names = [n for n in wb.sheetnames if n != SUMMARY_SHEET_NAME]
 
-    total_tp = total_fp = total_fn = 0
+    total_tp = total_fp = total_fn = total_tn = total_fp_rejected = 0
     per_recording = []
     for name in recording_names:
         sh = wb[name]
         tp = sh.cell(row=7, column=2).value or 0
         fp = sh.cell(row=8, column=2).value or 0
         fn = sh.cell(row=9, column=2).value or 0
-        sens = sh.cell(row=10, column=2).value
+        tn = sh.cell(row=10, column=2).value or 0
+        fp_rejected = sh.cell(row=11, column=2).value or 0
+        sens = sh.cell(row=12, column=2).value
+        spec = sh.cell(row=13, column=2).value
         total_tp += tp
         total_fp += fp
         total_fn += fn
-        per_recording.append((name, tp, fp, fn, sens))
+        total_tn += tn
+        total_fp_rejected += fp_rejected
+        per_recording.append((name, tp, fp, fn, tn, sens, spec))
 
     agg_sensitivity = (total_tp / (total_tp + total_fn)) if (total_tp + total_fn) > 0 else "N/A"
+    agg_specificity = (total_tn / (total_tn + total_fp_rejected)) if (total_tn + total_fp_rejected) > 0 else "N/A"
 
     meta_rows = [
         ("Number of Recordings", len(recording_names)),
@@ -113,25 +125,30 @@ def update_summary_sheet(wb: Workbook) -> None:
         ("Aggregate TP", total_tp),
         ("Aggregate FP", total_fp),
         ("Aggregate FN", total_fn),
+        ("Aggregate TN", total_tn),
+        ("Aggregate FP (Rejected)", total_fp_rejected),
         ("Aggregate Sensitivity", agg_sensitivity),
+        ("Aggregate Specificity", agg_specificity),
     ]
     for i, (label, value) in enumerate(meta_rows, start=1):
         ws.cell(row=i, column=1, value=label)
         ws.cell(row=i, column=2, value=value)
 
     header_row = len(meta_rows) + 3
-    headers = ["Recording", "TP", "FP", "FN", "Sensitivity"]
+    headers = ["Recording", "TP", "FP", "FN", "TN", "Sensitivity", "Specificity"]
     for c, h in enumerate(headers, start=1):
         ws.cell(row=header_row, column=c, value=h)
 
-    for i, (name, tp, fp, fn, sens) in enumerate(sorted(per_recording), start=header_row + 1):
+    for i, (name, tp, fp, fn, tn, sens, spec) in enumerate(sorted(per_recording), start=header_row + 1):
         ws.cell(row=i, column=1, value=name)
         ws.cell(row=i, column=2, value=tp)
         ws.cell(row=i, column=3, value=fp)
         ws.cell(row=i, column=4, value=fn)
-        ws.cell(row=i, column=5, value=sens)
+        ws.cell(row=i, column=5, value=tn)
+        ws.cell(row=i, column=6, value=sens)
+        ws.cell(row=i, column=7, value=spec)
 
-    for col, width in ((1, 30), (2, 10), (3, 10), (4, 10), (5, 14)):
+    for col, width in ((1, 30), (2, 10), (3, 10), (4, 10), (5, 10), (6, 14), (7, 14)):
         ws.column_dimensions[chr(64 + col)].width = width
 
 

@@ -48,7 +48,7 @@ class CustomNavigationToolbar(NavigationToolbar2QT):
 
     def _add_text_tools(self):
         """Add text-labeled tools."""
-        self.addAction("Pan", self.pan)
+        pass  # No tools - use keyboard shortcuts instead
 
 
 class InstructionDialog(QDialog):
@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self._full_xlim = None
         self._full_ylim = None
         self._full_ycenter = None           # Y center for signal centering
+        self._x_scroll_position = 0.5       # Horizontal scroll position (0-1, where 0.5 is center)
         self._dragging = False
         self._temp_line = None
         self._blit_bg = None
@@ -119,6 +120,32 @@ class MainWindow(QMainWindow):
         self.show_idle_screen()
 
     # ================================================================== UI SETUP
+
+    def _apply_button_styles(self):
+        """Apply consistent button styling with darker pressed state."""
+        button_style = """
+            QPushButton {
+                background-color: #f0f0f0;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QPushButton:pressed {
+                background-color: #404040;
+                color: white;
+            }
+            QPushButton:checked {
+                background-color: #0078d4;
+                color: white;
+                border: 2px solid #0078d4;
+            }
+        """
+        for btn in [self.browse_btn, self.no_seizure_btn, self.seizure_mark_btn,
+                    self.flag_btn, self.validate_btn, self.reject_btn, self.reset_btn,
+                    self.undo_btn, self.done_btn, self.toggle_filtered_btn,
+                    self.prev_candidate_btn, self.next_candidate_btn,
+                    self.pool_candidates_btn, self.pool_accepted_btn, self.pool_rejected_btn]:
+            btn.setStyleSheet(button_style)
 
     def _build_ui(self):
         """Build the complete UI layout."""
@@ -230,6 +257,9 @@ class MainWindow(QMainWindow):
         self.pool_candidates_btn.clicked.connect(lambda: self.on_pool_view_change("candidates"))
         self.pool_accepted_btn.clicked.connect(lambda: self.on_pool_view_change("accepted"))
         self.pool_rejected_btn.clicked.connect(lambda: self.on_pool_view_change("rejected"))
+
+        # Apply button styling
+        self._apply_button_styles()
 
     def _build_toolbar(self):
         """Build the top toolbar with browse and file info."""
@@ -651,18 +681,32 @@ class MainWindow(QMainWindow):
         self._update_scrollbars()
 
     def on_x_slider(self, value):
-        """Handle X slider movement - pan left/right."""
+        """Handle X slider movement - control horizontal zoom/density."""
         if self._full_xlim is None or self.state not in (STATE_SEIZURE_MARKING, STATE_FLAGGING):
             return
 
-        xlim = self.ax.get_xlim()
-        span = xlim[1] - xlim[0]
-        full_span = self._full_xlim[1] - self._full_xlim[0]
+        # Map slider position (0-1000) to zoom level (like Y slider)
+        # 500 = 1x zoom (full view)
+        # Lower = more zoom (tighter view, showing fewer events)
+        # Higher = less zoom (wider view, showing more events compressed)
+        fraction = value / 500.0  # 0 to 2
+        if fraction < 0.1:
+            fraction = 0.1  # Min zoom
 
-        # Map slider position (0-1000) to plot position
-        fraction = value / 1000.0
-        new_left = self._full_xlim[0] + fraction * (full_span - span)
-        new_right = new_left + span
+        full_span = self._full_xlim[1] - self._full_xlim[0]
+        current_center_frac = self._x_scroll_position  # Keep center position during zoom
+        half_span = full_span / (2 * fraction)
+
+        new_left = self._full_xlim[0] + current_center_frac * full_span - half_span
+        new_right = new_left + 2 * half_span
+
+        # Clamp to data limits
+        if new_left < self._full_xlim[0]:
+            new_left = self._full_xlim[0]
+            new_right = new_left + 2 * half_span
+        if new_right > self._full_xlim[1]:
+            new_right = self._full_xlim[1]
+            new_left = new_right - 2 * half_span
 
         self.ax.set_xlim(new_left, new_right)
         self.canvas.draw_idle()
@@ -857,17 +901,11 @@ class MainWindow(QMainWindow):
         """Handle keyboard shortcuts."""
         if self.state == STATE_FLAGGING:
             if event.key() == Qt.Key_V:
-                # Validate current candidate (only in candidates pool)
-                if self.pool_view == "candidates" and self._candidate_list and self._current_candidate_idx < len(self._candidate_list):
-                    event_time = self._candidate_list[self._current_candidate_idx]
-                    self._validate_preliminary_event(event_time)
-                    self.on_next_candidate()
+                # Validate selected event (same as clicking validate button)
+                self.on_validate_selected()
             elif event.key() == Qt.Key_R:
-                # Reject current candidate (only in candidates pool)
-                if self.pool_view == "candidates" and self._candidate_list and self._current_candidate_idx < len(self._candidate_list):
-                    event_time = self._candidate_list[self._current_candidate_idx]
-                    self._reject_preliminary_event(event_time)
-                    self.on_next_candidate()
+                # Reject selected event (same as clicking reject button)
+                self.on_reject_selected()
             elif event.key() == Qt.Key_Up or event.key() == Qt.Key_Down:
                 # Navigate between candidates
                 if event.key() == Qt.Key_Down:
@@ -875,11 +913,11 @@ class MainWindow(QMainWindow):
                 else:
                     self.on_prev_candidate()
             elif event.key() == Qt.Key_Right:
-                # Pan right
-                self._pan_x(0.1)
+                # Scroll right through trace
+                self._scroll_x(1)
             elif event.key() == Qt.Key_Left:
-                # Pan left
-                self._pan_x(-0.1)
+                # Scroll left through trace
+                self._scroll_x(-1)
             elif event.key() == Qt.Key_U:
                 self.on_undo()
             elif event.key() == Qt.Key_W:
@@ -949,18 +987,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
             self._unvalidate_event(self.selected_event)
-            self.on_next_candidate()
             self._redraw_pool_view()
         else:
-            # In candidates pool, validate only if zoomed to single event
-            if not self._can_validate_reject():
-                QMessageBox.warning(self, "Zoom Required", "Zoom into a single event before validating.")
-                return
+            # In candidates pool, must have an event selected
             if self.selected_event is None:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
             self._validate_preliminary_event(self.selected_event)
-            self.on_next_candidate()
+            self.selected_event = None
+            self._redraw_pool_view()
 
     def on_reject_selected(self):
         """Reject the selected event (or undo rejection in rejected pool)."""
@@ -970,18 +1005,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
             self._unrejected_event(self.selected_event)
-            self.on_next_candidate()
             self._redraw_pool_view()
         else:
-            # In candidates pool, reject only if zoomed to single event
-            if not self._can_validate_reject():
-                QMessageBox.warning(self, "Zoom Required", "Zoom into a single event before rejecting.")
-                return
+            # In candidates pool, must have an event selected
             if self.selected_event is None:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
                 return
             self._reject_preliminary_event(self.selected_event)
-            self.on_next_candidate()
+            self.selected_event = None
+            self._redraw_pool_view()
 
     def _validate_preliminary_event(self, event_time):
         """Move a preliminary event to validated."""
@@ -1139,14 +1171,27 @@ class MainWindow(QMainWindow):
         self.canvas.draw_idle()
         self._update_sliders()
 
-    def _pan_x(self, fraction):
-        """Pan the x-axis by a fraction of current view width."""
+    def _scroll_x(self, direction):
+        """Scroll horizontally through the trace (left=-1, right=+1)."""
+        if self._full_xlim is None:
+            return
+
+        full_span = self._full_xlim[1] - self._full_xlim[0]
         xlim = self.ax.get_xlim()
         span = xlim[1] - xlim[0]
-        pan_amount = span * fraction
 
-        new_left = xlim[0] + pan_amount
-        new_right = xlim[1] + pan_amount
+        # Scroll by 10% of current view width
+        scroll_amount = (span / full_span) * 0.1 * direction
+
+        # Update scroll position
+        self._x_scroll_position += scroll_amount
+        self._x_scroll_position = max(0, min(1, self._x_scroll_position))
+
+        # Calculate new limits
+        half_span = span / 2
+        new_center = self._full_xlim[0] + self._x_scroll_position * full_span
+        new_left = new_center - half_span
+        new_right = new_center + half_span
 
         # Clamp to data limits
         if new_left < self._full_xlim[0]:
@@ -1346,42 +1391,42 @@ Help:
             self.toggle_filtered_btn.setVisible(True)
             self._update_candidate_list_for_pool("candidates")
         elif pool_type == "accepted":
-            # Review mode for accepted events
+            # Review mode for accepted events - show all superimposed
             self.flag_btn.setChecked(False)  # Ensure flag mode is off
             self.flag_btn.setVisible(False)
             self.validate_btn.setText("Undo\nValidation [W]")
             self.validate_btn.setVisible(True)
             self.reject_btn.setVisible(False)
-            self.prev_candidate_btn.setVisible(True)
-            self.next_candidate_btn.setVisible(True)
-            self.candidate_counter.setVisible(True)
-            self.x_slider.setEnabled(False)
-            self.y_slider.setEnabled(False)
+            self.prev_candidate_btn.setVisible(False)  # Hide navigation - showing all events
+            self.next_candidate_btn.setVisible(False)
+            self.candidate_counter.setVisible(False)
+            self.x_slider.setEnabled(True)  # Enable scrolling
+            self.y_slider.setEnabled(True)
             self.toggle_filtered_btn.setVisible(True)
             self._update_candidate_list_for_pool("accepted")
         elif pool_type == "rejected":
-            # Review mode for rejected events
+            # Review mode for rejected events - show all superimposed
             self.flag_btn.setChecked(False)  # Ensure flag mode is off
             self.flag_btn.setVisible(False)
             self.validate_btn.setVisible(False)
             self.reject_btn.setText("Undo\nRejection [W]")
             self.reject_btn.setVisible(True)
-            self.prev_candidate_btn.setVisible(True)
-            self.next_candidate_btn.setVisible(True)
-            self.candidate_counter.setVisible(True)
-            self.x_slider.setEnabled(False)
-            self.y_slider.setEnabled(False)
+            self.prev_candidate_btn.setVisible(False)  # Hide navigation - showing all events
+            self.next_candidate_btn.setVisible(False)
+            self.candidate_counter.setVisible(False)
+            self.x_slider.setEnabled(True)  # Enable scrolling
+            self.y_slider.setEnabled(True)
             self.toggle_filtered_btn.setVisible(True)
             self._update_candidate_list_for_pool("rejected")
 
-        # Redraw plot with appropriate events and zoom to first event
+        # Redraw plot with appropriate events
         self._redraw_pool_view()
 
-        # Zoom to first event in the new pool (or reset to full view if empty)
-        if self._candidate_list:
+        # For candidates pool, zoom to first event; for accepted/rejected, show all
+        if pool_type == "candidates" and self._candidate_list:
             self._zoom_to_event(self._candidate_list[0])
         else:
-            # Reset to full view if pool is empty
+            # Show full view for accepted/rejected pools or if no candidates
             if self._full_xlim is not None:
                 self.ax.set_xlim(*self._full_xlim)
             if self._full_ylim is not None:
@@ -1740,19 +1785,26 @@ Help:
         self.undo_btn.setVisible(False)
         self.done_btn.setVisible(False)
 
-        gt_times = sorted(self.validated_flags.keys())
+        gt_times = sorted(self.validated_events)
+        rejected_times = sorted(self.rejected_events)
         result = scoring.score_events(
-            gt_times, list(self.algo_events), tolerance_s=scoring.MATCH_TOLERANCE_S
+            gt_times, list(self.algo_events),
+            tolerance_s=scoring.MATCH_TOLERANCE_S,
+            rejected_times=rejected_times
         )
 
         sens_str = f"{result.sensitivity:.3f}" if result.sensitivity is not None else "N/A"
+        spec_str = f"{result.specificity:.3f}" if result.specificity is not None else "N/A"
 
         QMessageBox.information(
             self, "Analysis Results",
-            f"Ground truth events: {len(gt_times)}\n"
+            f"Ground truth (validated) events: {len(gt_times)}\n"
+            f"Rejected events: {len(rejected_times)}\n"
             f"Algorithm events (pre-seizure): {len(self.algo_events)}\n\n"
             f"TP: {result.tp}\nFP: {result.fp}\nFN: {result.fn}\n"
-            f"Sensitivity: {sens_str}",
+            f"TN: {result.tn}\nFP (from rejected): {result.fp_rejected}\n\n"
+            f"Sensitivity: {sens_str}\n"
+            f"Specificity: {spec_str}",
         )
 
         self._save_to_workbook(result, gt_times)
@@ -1785,6 +1837,9 @@ Help:
             fn=result.fn,
             sensitivity=result.sensitivity,
             tp_pairs=result.tp_pairs,
+            tn=result.tn,
+            fp_rejected=result.fp_rejected,
+            specificity=result.specificity,
         )
 
         try:
