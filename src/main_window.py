@@ -667,7 +667,7 @@ class MainWindow(QMainWindow):
         self._update_sliders()
 
     def on_xlim_changed(self, ax):
-        """Enforce minimum zoom span."""
+        """Enforce minimum zoom span and update axis labels."""
         if self._clamping or self.state != STATE_FLAGGING:
             return
         xlim = ax.get_xlim()
@@ -678,14 +678,22 @@ class MainWindow(QMainWindow):
             ax.set_xlim(center - MIN_ZOOM_SPAN_S / 2, center + MIN_ZOOM_SPAN_S / 2)
             self._clamping = False
             self.canvas.draw_idle()
+
+        # Update x-axis label granularity based on zoom level
+        from matplotlib.ticker import MaxNLocator
+        self.ax.xaxis.set_major_locator(MaxNLocator(100))  # Show ~10 ticks for readability
         self._update_scrollbars()
 
     def on_x_slider(self, value):
-        """Handle X slider movement - control horizontal zoom/density."""
+        """Handle X slider movement - zoom in/out around current center of view."""
         if self._full_xlim is None or self.state not in (STATE_SEIZURE_MARKING, STATE_FLAGGING):
             return
 
-        # Map slider position (0-1000) to zoom level (like Y slider)
+        # Get current view center (what user is looking at)
+        xlim = self.ax.get_xlim()
+        current_center = (xlim[0] + xlim[1]) / 2
+
+        # Map slider position (0-1000) to zoom level (same formula as Y slider)
         # 500 = 1x zoom (full view)
         # Lower = more zoom (tighter view, showing fewer events)
         # Higher = less zoom (wider view, showing more events compressed)
@@ -693,12 +701,13 @@ class MainWindow(QMainWindow):
         if fraction < 0.1:
             fraction = 0.1  # Min zoom
 
+        # Calculate new half_span using same formula as Y slider
         full_span = self._full_xlim[1] - self._full_xlim[0]
-        current_center_frac = self._x_scroll_position  # Keep center position during zoom
         half_span = full_span / (2 * fraction)
 
-        new_left = self._full_xlim[0] + current_center_frac * full_span - half_span
-        new_right = new_left + 2 * half_span
+        # Calculate new limits around the current center
+        new_left = current_center - half_span
+        new_right = current_center + half_span
 
         # Clamp to data limits
         if new_left < self._full_xlim[0]:
@@ -739,15 +748,8 @@ class MainWindow(QMainWindow):
         if self._full_xlim is None or self._full_ylim is None:
             return
 
-        # Update X slider
-        xlim = self.ax.get_xlim()
-        x_span = xlim[1] - xlim[0]
-        x_full_span = self._full_xlim[1] - self._full_xlim[0]
-        if x_full_span > x_span:
-            x_fraction = (xlim[0] - self._full_xlim[0]) / (x_full_span - x_span)
-            self.x_slider.blockSignals(True)
-            self.x_slider.setValue(int(x_fraction * 1000))
-            self.x_slider.blockSignals(False)
+        # NOTE: X slider is NOT automatically updated - it only responds to user interaction
+        # This prevents circular dependencies where code zoom triggers slider update which triggers more zoom
 
         # Update Y slider
         ylim = self.ax.get_ylim()
@@ -897,61 +899,84 @@ class MainWindow(QMainWindow):
         self._update_pool_button_styles()
         self._update_button_states()
 
+        # Set focus to canvas so keyboard events reach keyPressEvent
+        self.canvas.setFocus()
+
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""
         if self.state == STATE_FLAGGING:
+            handled = False
+
             if event.key() == Qt.Key_V:
                 # Validate selected event (same as clicking validate button)
                 self.on_validate_selected()
+                handled = True
             elif event.key() == Qt.Key_R:
                 # Reject selected event (same as clicking reject button)
                 self.on_reject_selected()
+                handled = True
             elif event.key() == Qt.Key_Up or event.key() == Qt.Key_Down:
                 # Navigate between candidates
                 if event.key() == Qt.Key_Down:
                     self.on_next_candidate()
                 else:
                     self.on_prev_candidate()
-            elif event.key() == Qt.Key_Right:
-                # Scroll right through trace
-                self._scroll_x(1)
-            elif event.key() == Qt.Key_Left:
-                # Scroll left through trace
-                self._scroll_x(-1)
+                handled = True
             elif event.key() == Qt.Key_U:
                 self.on_undo()
+                handled = True
             elif event.key() == Qt.Key_W:
                 # Withdraw (undo) validation/rejection in accepted/rejected pools
                 if self.pool_view == "accepted":
                     self.on_validate_selected()
                 elif self.pool_view == "rejected":
                     self.on_reject_selected()
+                handled = True
             elif event.key() == Qt.Key_F:
                 self.flag_btn.setChecked(not self.flag_btn.isChecked())
+                handled = True
             elif event.key() == Qt.Key_D:
                 self.on_done_clicked()
+                handled = True
             elif event.key() == Qt.Key_1:
                 # Switch to candidates pool
                 self.on_pool_view_change("candidates")
+                handled = True
             elif event.key() == Qt.Key_2:
                 # Switch to accepted pool
                 self.on_pool_view_change("accepted")
+                handled = True
             elif event.key() == Qt.Key_3:
                 # Switch to rejected pool
                 self.on_pool_view_change("rejected")
+                handled = True
             elif event.key() == Qt.Key_A:
                 # Zoom fit all
                 self._zoom_fit_all()
+                handled = True
             elif event.key() == Qt.Key_S:
                 # Zoom to single event (±500ms)
                 if self._candidate_list and self._current_candidate_idx < len(self._candidate_list):
                     self._zoom_to_event(self._candidate_list[self._current_candidate_idx])
+                handled = True
             elif event.key() == Qt.Key_T:
                 # Toggle filtered signal
                 self.toggle_filtered_btn.setChecked(not self.toggle_filtered_btn.isChecked())
+                handled = True
             elif event.key() == Qt.Key_H:
                 # Show keyboard shortcuts help
                 self._show_keyboard_help()
+                handled = True
+            elif event.text() in ('[', ']'):
+                # Scroll through trace with bracket keys
+                if event.text() == '[':
+                    self._scroll_x(-1)
+                else:
+                    self._scroll_x(1)
+                handled = True
+
+            if handled:
+                event.accept()
             else:
                 super().keyPressEvent(event)
         else:
@@ -1169,7 +1194,11 @@ class MainWindow(QMainWindow):
 
         self.ax.set_xlim(new_left, new_right)
         self.canvas.draw_idle()
-        self._update_sliders()
+
+        # Reset X slider to center (500) so user has room to zoom in/out
+        self.x_slider.blockSignals(True)
+        self.x_slider.setValue(500)
+        self.x_slider.blockSignals(False)
 
     def _scroll_x(self, direction):
         """Scroll horizontally through the trace (left=-1, right=+1)."""
@@ -1228,7 +1257,11 @@ class MainWindow(QMainWindow):
         if self._full_ylim is not None:
             self.ax.set_ylim(*self._full_ylim)
         self.canvas.draw_idle()
-        self._update_sliders()
+
+        # Reset X slider to center (500) for full view
+        self.x_slider.blockSignals(True)
+        self.x_slider.setValue(500)
+        self.x_slider.blockSignals(False)
 
     def _zoom_to_span(self, span_seconds):
         """Zoom to a specific time span centered at current view."""
@@ -1247,14 +1280,20 @@ class MainWindow(QMainWindow):
 
         self.ax.set_xlim(new_left, new_right)
         self.canvas.draw_idle()
-        self._update_sliders()
+
+        # Reset X slider to center (500) so user can adjust zoom
+        self.x_slider.blockSignals(True)
+        self.x_slider.setValue(500)
+        self.x_slider.blockSignals(False)
 
     def _show_keyboard_help(self):
         """Show keyboard shortcuts help dialog."""
         help_text = """
 KEYBOARD SHORTCUTS
 
-Navigation:
+Navigation & Scrolling:
+  [ / ] . . . . . . . . . Scroll left / right through trace
+  Up/Down . . . . . . . . Previous / Next candidate
   A . . . . . . . . . . . Reset view (fit all)
   S . . . . . . . . . . . Zoom Single Event (±500ms)
   T . . . . . . . . . . . Toggle Filtered Signal
