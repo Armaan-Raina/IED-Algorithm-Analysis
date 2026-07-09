@@ -204,39 +204,10 @@ class MainWindow(QMainWindow):
 
         plot_layout.addLayout(plot_area_layout, stretch=1)
 
-        # X slider (horizontal, below plot, exact width match)
-        x_slider_layout = QHBoxLayout()
-        x_slider_layout.setContentsMargins(0, 0, 0, 0)
-        x_slider_layout.setSpacing(0)
-
-        self.x_slider = QScrollBar(Qt.Horizontal)
-        self.x_slider.setMaximum(1000)
-        self.x_slider.setValue(500)
-        self.x_slider.setFixedHeight(20)
-        self.x_slider.sliderMoved.connect(self.on_x_slider)
-        self.x_slider.setStyleSheet("""
-            QScrollBar:horizontal {
-                border: 1px solid #ccc;
-                background: #f0f0f0;
-                height: 18px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #0078d4;
-                border-radius: 4px;
-                min-width: 50px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #005a9e;
-            }
-        """)
-        x_slider_layout.addWidget(self.x_slider, stretch=1)
 
         # Spacer for corner alignment with Y scrollbar
         spacer = QWidget()
         spacer.setFixedSize(20, 20)
-        x_slider_layout.addWidget(spacer)
-
-        plot_layout.addLayout(x_slider_layout)
 
         main_layout.addWidget(plot_widget, stretch=1)
 
@@ -371,7 +342,6 @@ class MainWindow(QMainWindow):
         self.flag_btn.setMinimumHeight(80)
         self.flag_btn.setMinimumWidth(140)
         self.flag_btn.setCheckable(True)
-        self.flag_btn.toggled.connect(self.on_flag_mode_toggled)
         self.flag_btn.setVisible(False)
         layout.addWidget(self.flag_btn)
 
@@ -519,7 +489,7 @@ class MainWindow(QMainWindow):
         self.ax.grid(True, alpha=0.3)
         self.canvas.draw_idle()
 
-        self._full_xlim = (t[0], t[-1])
+        self._full_xlim = self.ax.get_xlim() #(t[0], t[-1])
         self._full_ylim = self.ax.get_ylim()
         # Calculate Y center for signal centering
         self._full_ycenter = (self._full_ylim[0] + self._full_ylim[1]) / 2
@@ -684,41 +654,6 @@ class MainWindow(QMainWindow):
         self.ax.xaxis.set_major_locator(MaxNLocator(100))  # Show ~10 ticks for readability
         self._update_scrollbars()
 
-    def on_x_slider(self, value):
-        """Handle X slider movement - zoom in/out around current center of view."""
-        if self._full_xlim is None or self.state not in (STATE_SEIZURE_MARKING, STATE_FLAGGING):
-            return
-
-        # Get current view center (what user is looking at)
-        xlim = self.ax.get_xlim()
-        current_center = (xlim[0] + xlim[1]) / 2
-
-        # Map slider position (0-1000) to zoom level (same formula as Y slider)
-        # 500 = 1x zoom (full view)
-        # Lower = more zoom (tighter view, showing fewer events)
-        # Higher = less zoom (wider view, showing more events compressed)
-        fraction = value / 500.0  # 0 to 2
-        if fraction < 0.1:
-            fraction = 0.1  # Min zoom
-
-        # Calculate new half_span using same formula as Y slider
-        full_span = self._full_xlim[1] - self._full_xlim[0]
-        half_span = full_span / (2 * fraction)
-
-        # Calculate new limits around the current center
-        new_left = current_center - half_span
-        new_right = current_center + half_span
-
-        # Clamp to data limits
-        if new_left < self._full_xlim[0]:
-            new_left = self._full_xlim[0]
-            new_right = new_left + 2 * half_span
-        if new_right > self._full_xlim[1]:
-            new_right = self._full_xlim[1]
-            new_left = new_right - 2 * half_span
-
-        self.ax.set_xlim(new_left, new_right)
-        self.canvas.draw_idle()
 
     def on_y_slider(self, value):
         """Handle Y slider movement - scale around center."""
@@ -987,12 +922,10 @@ class MainWindow(QMainWindow):
         if checked:
             self.flag_btn.setStyleSheet("background-color: #ffe6e6;")
             # Disable scrollbars when in flag mode
-            self.x_slider.setEnabled(False)
             self.y_slider.setEnabled(False)
         else:
             self.flag_btn.setStyleSheet("")
             # Re-enable scrollbars
-            self.x_slider.setEnabled(True)
             self.y_slider.setEnabled(True)
 
     def on_reset_perspective(self):
@@ -1098,6 +1031,7 @@ class MainWindow(QMainWindow):
             self.manually_flagged_events.add(t_flag)
             # Automatically add to validated events
             self.validated_events.add(t_flag)
+            self.flag_btn.setChecked(False)
         self._push_undo_state()
 
     def _remove_validated_flag(self, t_flag):
@@ -1129,53 +1063,6 @@ class MainWindow(QMainWindow):
                 return t_flag
         return None
 
-    def _start_drag_manually_flagged(self, event_time, initial_xdata):
-        """Start dragging a manually flagged event."""
-        self._dragging_manual_flag = True
-        self._dragged_flag_time = event_time
-        self._drag_start_xdata = initial_xdata
-        self.flag_btn.setText("🚩 Drag to Shift")
-
-    def _update_dragged_manual_flag(self, current_xdata):
-        """Update manually flagged event position while dragging."""
-        if not hasattr(self, '_dragging_manual_flag') or not self._dragging_manual_flag or current_xdata is None:
-            return
-        if self._dragged_flag_time in self.manually_flagged_flags:
-            line = self.manually_flagged_flags[self._dragged_flag_time]
-            line.set_xdata([current_xdata, current_xdata])
-            self.canvas.draw_idle()
-
-    def _finish_drag_manually_flagged(self, final_xdata):
-        """Finish dragging and update manually flagged event position."""
-        if not hasattr(self, '_dragging_manual_flag') or not self._dragging_manual_flag:
-            self._dragging_manual_flag = False
-            self.flag_btn.setText("🚩 Flag Event\n(Manual) [F]")
-            return
-
-        if final_xdata is None:
-            self._dragging_manual_flag = False
-            self.flag_btn.setText("🚩 Flag Event\n(Manual) [F]")
-            return
-
-        self._push_undo_state()
-        old_time = self._dragged_flag_time
-        new_time = final_xdata
-
-        # Clamp to data range
-        if new_time < self.t[0]:
-            new_time = self.t[0]
-        elif new_time > self.t[-1]:
-            new_time = self.t[-1]
-
-        # Move event to new location
-        if old_time in self.manually_flagged_flags:
-            line = self.manually_flagged_flags.pop(old_time)
-            line.set_xdata([new_time, new_time])
-            self.manually_flagged_flags[new_time] = line
-
-        self._dragging_manual_flag = False
-        self.flag_btn.setText("🚩 Flag Event\n(Manual) [F]")
-        self.canvas.draw_idle()
 
     def _pixel_x(self, data_x):
         """Convert data x-coordinate to pixel x-coordinate."""
@@ -1195,10 +1082,6 @@ class MainWindow(QMainWindow):
         self.ax.set_xlim(new_left, new_right)
         self.canvas.draw_idle()
 
-        # Reset X slider to center (500) so user has room to zoom in/out
-        self.x_slider.blockSignals(True)
-        self.x_slider.setValue(500)
-        self.x_slider.blockSignals(False)
 
     def _scroll_x(self, direction):
         """Scroll horizontally through the trace (left=-1, right=+1)."""
@@ -1258,10 +1141,7 @@ class MainWindow(QMainWindow):
             self.ax.set_ylim(*self._full_ylim)
         self.canvas.draw_idle()
 
-        # Reset X slider to center (500) for full view
-        self.x_slider.blockSignals(True)
-        self.x_slider.setValue(500)
-        self.x_slider.blockSignals(False)
+
 
     def _zoom_to_span(self, span_seconds):
         """Zoom to a specific time span centered at current view."""
@@ -1281,10 +1161,6 @@ class MainWindow(QMainWindow):
         self.ax.set_xlim(new_left, new_right)
         self.canvas.draw_idle()
 
-        # Reset X slider to center (500) so user can adjust zoom
-        self.x_slider.blockSignals(True)
-        self.x_slider.setValue(500)
-        self.x_slider.blockSignals(False)
 
     def _show_keyboard_help(self):
         """Show keyboard shortcuts help dialog."""
@@ -1425,7 +1301,6 @@ Help:
             self.prev_candidate_btn.setVisible(True)
             self.next_candidate_btn.setVisible(True)
             self.candidate_counter.setVisible(True)
-            self.x_slider.setEnabled(True)
             self.y_slider.setEnabled(True)
             self.toggle_filtered_btn.setVisible(True)
             self._update_candidate_list_for_pool("candidates")
@@ -1439,7 +1314,6 @@ Help:
             self.prev_candidate_btn.setVisible(False)  # Hide navigation - showing all events
             self.next_candidate_btn.setVisible(False)
             self.candidate_counter.setVisible(False)
-            self.x_slider.setEnabled(True)  # Enable scrolling
             self.y_slider.setEnabled(True)
             self.toggle_filtered_btn.setVisible(True)
             self._update_candidate_list_for_pool("accepted")
@@ -1453,7 +1327,6 @@ Help:
             self.prev_candidate_btn.setVisible(False)  # Hide navigation - showing all events
             self.next_candidate_btn.setVisible(False)
             self.candidate_counter.setVisible(False)
-            self.x_slider.setEnabled(True)  # Enable scrolling
             self.y_slider.setEnabled(True)
             self.toggle_filtered_btn.setVisible(True)
             self._update_candidate_list_for_pool("rejected")
