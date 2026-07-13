@@ -39,7 +39,7 @@ FILTER_ORDER = 4
 
 # If True, use zero-phase offline filtering for debug visualization.
 # If False, use causal filtering, closer to embedded behavior.
-USE_ZERO_PHASE_FILTER = True
+USE_ZERO_PHASE_FILTER = False
 
 # This should match your current STM32 debug condition:
 #   float bp = x;
@@ -81,14 +81,19 @@ PLOT_END_S = None
 @dataclass
 class IEDParams:
     fs_hz: float
+
     env_k: float
     amp_min_k: float
     amp_artifact_k: float
+
     baseline_alpha: float
     min_std: float
+
     warmup_samples: int
     refractory_samples: int
     envelope_window_samples: int
+
+    feature_window_samples = int(round(0.025 * fs))
 
 
 class IEDDetector:
@@ -128,6 +133,14 @@ class IEDDetector:
         self.env_index = 0
         self.env_count = 0
 
+        self.last_env_mean = 0.0
+        self.last_env_std = 0.0
+        self.last_env_z = 0.0
+
+        self.last_amp_mean = 0.0
+        self.last_amp_std = 0.0
+        self.last_amp_z = 0.0
+
         # Debug values
         self.last_bandpass = 0.0
         self.last_envelope = 0.0
@@ -135,6 +148,38 @@ class IEDDetector:
         self.last_env_thresh = 0.0
         self.last_amp_min_thresh = 0.0
         self.last_amp_artifact_thresh = 0.0
+
+        feature_window = self.p.feature_window_samples
+
+        self.feature_index = 0
+        self.feature_count = 0
+
+        self.previous_bp = 0.0
+        self.has_previous_bp = False
+
+        # Line-length buffer stores |x[n] - x[n-1]|
+        self.line_length_buffer = np.zeros(feature_window, dtype=float)
+        self.line_length_sum = 0.0
+
+        # Energy buffer stores x[n]^2
+        self.energy_buffer = np.zeros(feature_window, dtype=float)
+        self.energy_sum = 0.0
+
+        # Adaptive feature baselines
+        self.line_length_mean = 0.0
+        self.line_length_var = 0.0
+
+        self.energy_mean = 0.0
+        self.energy_var = 0.0
+
+        # Last calculated values for offline inspection
+        self.last_line_length = 0.0
+        self.last_line_length_z = 0.0
+
+        self.last_energy = 0.0
+        self.last_energy_z = 0.0
+
+        self.last_abs_slope = 0.0
 
     @staticmethod
     def _update_baseline(x, alpha, mean, var):
@@ -163,32 +208,105 @@ class IEDDetector:
             return 0.0
 
         return self.env_sum / self.env_count
+    
+    def _update_rolling_features(self, bp):
+        """
+        Update causal rolling features using the current bandpassed sample.
 
-    def process_sample(self, raw_sample):
+        The rolling window includes only the current and previous samples.
+        No future samples are used.
+        """
+        window = self.p.feature_window_samples
+
+        if self.has_previous_bp:
+            abs_difference = abs(bp - self.previous_bp)
+        else:
+            abs_difference = 0.0
+            self.has_previous_bp = True
+
+        self.previous_bp = bp
+
+        squared_sample = bp * bp
+
+        # Remove oldest values when the buffers are full
+        if self.feature_count >= window:
+            self.line_length_sum -= self.line_length_buffer[self.feature_index]
+            self.energy_sum -= self.energy_buffer[self.feature_index]
+        else:
+            self.feature_count += 1
+
+        # Insert current values
+        self.line_length_buffer[self.feature_index] = abs_difference
+        self.energy_buffer[self.feature_index] = squared_sample
+
+        self.line_length_sum += abs_difference
+        self.energy_sum += squared_sample
+
+        self.feature_index += 1
+
+        if self.feature_index >= window:
+            self.feature_index = 0
+
+        # Fixed-window line length
+        line_length = self.line_length_sum
+
+        # Mean-square energy makes different window lengths easier to compare
+        mean_square_energy = self.energy_sum / max(self.feature_count, 1)
+
+        return line_length, mean_square_energy, abs_difference
+
+    def process_sample(self, raw_sample, amplitude_sample=None):
         self.sample_count += 1
         sample_idx = self.sample_count - 1
 
-        x = float(raw_sample)
+        bp = float(raw_sample)
 
-        # Current STM32 debug mode:
-        #   float bp = x;
-        bp = x
+        if amplitude_sample is None:
+            amplitude_sample = raw_sample
+
+        amplitude_source = float(amplitude_sample)
+
         self.last_bandpass = bp
 
         rectified = abs(bp)
-
         env = self._moving_average_envelope(rectified)
         self.last_envelope = env
 
-        # Current debug simplification:
-        #   float hp = x;
-        #   amp = fabsf(hp)
-        # Since x is already filtered, amp = abs(x) is acceptable.
-        amp = abs(x)
+        amp = abs(amplitude_source)
         self.last_amp = amp
+
+        line_length, energy, abs_slope = self._update_rolling_features(bp)
+
+        self.last_line_length = line_length
+        self.last_energy = energy
+        self.last_abs_slope = abs_slope
+
+        line_length_std = np.sqrt(
+            max(self.line_length_var, self.p.min_std * self.p.min_std)
+        )
+
+        energy_std = np.sqrt(
+            max(self.energy_var, self.p.min_std * self.p.min_std)
+        )
+
+        self.last_line_length_z = (
+            line_length - self.line_length_mean
+        ) / line_length_std
+
+        self.last_energy_z = (
+            energy - self.energy_mean
+        ) / energy_std
 
         env_std = np.sqrt(max(self.env_var, self.p.min_std * self.p.min_std))
         amp_std = np.sqrt(max(self.amp_var, self.p.min_std * self.p.min_std))
+
+        self.last_env_mean = self.env_mean
+        self.last_env_std = env_std
+        self.last_env_z = (env - self.env_mean) / env_std
+
+        self.last_amp_mean = self.amp_mean
+        self.last_amp_std = amp_std
+        self.last_amp_z = (amp - self.amp_mean) / amp_std
 
         env_thresh = self.env_mean + self.p.env_k * env_std
         amp_min_thresh = self.amp_mean + self.p.amp_min_k * amp_std

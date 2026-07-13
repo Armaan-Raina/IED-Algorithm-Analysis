@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QScrollBar, QFrame,
 )
 
-from . import data_io, signal_processing, scoring, workbook
+from . import data_io, signal_processing, scoring, workbook, closed_loop_feature_calc, feature_io
 import json
 from pathlib import Path
 
@@ -1527,8 +1527,6 @@ Help:
         layout = QVBoxLayout(overlay_window)
 
         # Create figure for the overlay plot
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
         fig = Figure(figsize=(10, 6))
         ax = fig.add_subplot(111)
         canvas = FigureCanvasQTAgg(fig)
@@ -1665,7 +1663,12 @@ Help:
             f"Specificity: {spec_str}",
         )
 
+        closed_loop_analysis = closed_loop_feature_calc.ClosedLoopFeatureAnalysis(gt_times, self.recording, rejected_timestamps=rejected_times)
+        closed_loop_features = closed_loop_analysis.calculate_feature_traces()
+        closed_loop_analysis.annotate_samples()
+
         self._save_to_workbook(result, gt_times)
+        self._save_features_to_csv(closed_loop_analysis)
 
     def _save_to_workbook(self, result, gt_times):
         """Save results to Excel workbook."""
@@ -1709,4 +1712,40 @@ Help:
         QMessageBox.information(
             self, "Saved",
             f"Results saved to:\n{path}\n\nSheet: {workbook.sheet_name_for(file_result)}",
+        )
+
+    def _save_features_to_csv(self, closed_loop_analysis):
+        """Save all sample-level closed-loop features to CSV."""
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save closed-loop feature samples",
+            f"{self.recording.file_stem}_closed_loop_features.csv",
+            "CSV Files (*.csv)",
+        )
+
+        if not path:
+            return
+
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+
+        try:
+            output_path = feature_io.save_sample_features_csv(
+                path=path,
+                analysis=closed_loop_analysis,
+                chunk_rows=250_000,
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Failed to save feature CSV",
+                str(exc),
+            )
+            return
+
+        QMessageBox.information(
+            self,
+            "Features Saved",
+            f"Sample-level feature data saved to:\n{output_path}",
         )
