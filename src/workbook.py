@@ -9,7 +9,7 @@ from typing import Optional
 from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-SUMMARY_SHEET_NAME = "Summary"
+SUMMARY_SHEET_NAME = "Summary" #important in the LSV file
 
 CHANNEL_SUFFIX = {"hippocampus": "_hpc", "thalamus": "_thal"}
 
@@ -75,11 +75,15 @@ def write_file_sheet(wb: Workbook, result: FileResult) -> str:
         ws.cell(row=i, column=1, value=label)
         ws.cell(row=i, column=2, value=value)
 
+    #Note this should not just be true positive events, it should be all events with an extra "feature" 
+    #of whether or not it was real
     header_row = len(rows) + 3
     ws.cell(row=header_row - 1, column=1, value="True Positive Events")
     ws.cell(row=header_row, column=1, value="GT Time (s)")
     ws.cell(row=header_row, column=2, value="Matched Algo Time (s)")
     ws.cell(row=header_row, column=3, value="Features (TBD)")
+
+    #Looks like row 17 is the first one with real data, start collecting from here for LSV and RFC
 
     for i, (gt_t, algo_t) in enumerate(result.tp_pairs, start=header_row + 1):
         ws.cell(row=i, column=1, value=gt_t)
