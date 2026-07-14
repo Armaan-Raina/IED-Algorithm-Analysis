@@ -50,7 +50,7 @@ class FeatureParams:
     feature_window_samples: int = 125
 
 class ClosedLoopFeatureAnalysis:
-    """ Calculate closed loop features on timestamps"""
+    """Calculate closed loop features on timestamps"""
 
     def __init__(self, timestamps, recording, rejected_timestamps=None, replay_config=None, feature_params=None, raw=None):
         self.timestamps = np.sort(np.asarray(timestamps, dtype=float))

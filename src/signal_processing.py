@@ -4,6 +4,7 @@ import numpy as np
 from scipy.signal import butter, sosfiltfilt, find_peaks
 
 FILTER_LOWPASS_HZ = 200.0
+FILTER_HIGHPASS_HZ = 15
 FILTER_ORDER = 4
 
 SNAP_HALF_WINDOW_S = 0.025
@@ -13,8 +14,8 @@ def bandpass_filter(signal: np.ndarray, fs: float) -> np.ndarray:
     """Zero-phase lowpass filter at 300Hz for IED detection."""
     sos = butter(
         FILTER_ORDER,
-        FILTER_LOWPASS_HZ,
-        btype="low",
+        FILTER_HIGHPASS_HZ,
+        btype="high",
         fs=fs,
         output="sos",
     )
