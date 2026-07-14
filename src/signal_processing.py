@@ -10,15 +10,37 @@ FILTER_ORDER = 4
 SNAP_HALF_WINDOW_S = 0.025
 
 
-def bandpass_filter(signal: np.ndarray, fs: float) -> np.ndarray:
-    """Zero-phase lowpass filter at 300Hz for IED detection."""
-    sos = butter(
-        FILTER_ORDER,
-        FILTER_HIGHPASS_HZ,
-        btype="high",
-        fs=fs,
-        output="sos",
-    )
+def bandpass_filter(signal: np.ndarray, fs: float, highpass_hz: float = None, lowpass_hz: float = None) -> np.ndarray:
+    """Zero-phase bandpass filter for IED detection.
+
+    Args:
+        signal: Input signal
+        fs: Sampling frequency
+        highpass_hz: Highpass cutoff frequency (Hz). If None, uses FILTER_HIGHPASS_HZ default.
+        lowpass_hz: Lowpass cutoff frequency (Hz). If None, applies only highpass filter.
+    """
+    if highpass_hz is None:
+        highpass_hz = FILTER_HIGHPASS_HZ
+
+    if lowpass_hz is not None:
+        # Full bandpass filter
+        sos = butter(
+            FILTER_ORDER,
+            [highpass_hz, lowpass_hz],
+            btype="band",
+            fs=fs,
+            output="sos",
+        )
+    else:
+        # Highpass only
+        sos = butter(
+            FILTER_ORDER,
+            highpass_hz,
+            btype="high",
+            fs=fs,
+            output="sos",
+        )
+
     return sosfiltfilt(sos, signal)
 
 

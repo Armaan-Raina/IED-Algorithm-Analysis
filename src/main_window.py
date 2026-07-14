@@ -73,6 +73,67 @@ class InstructionDialog(QDialog):
         layout.addWidget(ok_btn)
 
 
+class BandpassFilterDialog(QDialog):
+    """Dialog for configuring bandpass filter parameters."""
+
+    def __init__(self, parent, lowpass_hz=None):
+        super().__init__(parent)
+        self.setWindowTitle("Bandpass Filter Settings")
+        self.setGeometry(200, 200, 400, 250)
+        self.lowpass_hz = lowpass_hz
+
+        layout = QVBoxLayout(self)
+
+        # Highpass frequency
+        highpass_layout = QHBoxLayout()
+        highpass_label = QLabel("Highpass (Hz):")
+        highpass_label.setMinimumWidth(120)
+        highpass_layout.addWidget(highpass_label)
+        self.highpass_input = QInputDialog()
+        self.highpass_spinbox = QInputDialog().spinBox if hasattr(QInputDialog(), 'spinBox') else None
+
+        # Use spinbox for better UX
+        from PyQt5.QtWidgets import QSpinBox
+        self.highpass_spinbox = QSpinBox()
+        self.highpass_spinbox.setMinimum(1)
+        self.highpass_spinbox.setMaximum(100)
+        self.highpass_spinbox.setValue(15)
+        self.highpass_spinbox.setMinimumWidth(100)
+        highpass_layout.addWidget(self.highpass_spinbox)
+        highpass_layout.addStretch()
+        layout.addLayout(highpass_layout)
+
+        # Lowpass frequency
+        lowpass_layout = QHBoxLayout()
+        lowpass_label = QLabel("Lowpass (Hz):")
+        lowpass_label.setMinimumWidth(120)
+        lowpass_layout.addWidget(lowpass_label)
+
+        self.lowpass_spinbox = QSpinBox()
+        self.lowpass_spinbox.setMinimum(10)
+        self.lowpass_spinbox.setMaximum(500)
+        self.lowpass_spinbox.setValue(int(lowpass_hz) if lowpass_hz else 200)
+        self.lowpass_spinbox.setMinimumWidth(100)
+        lowpass_layout.addWidget(self.lowpass_spinbox)
+        lowpass_layout.addStretch()
+        layout.addLayout(lowpass_layout)
+
+        # Info text
+        info_label = QLabel("Set the frequency bounds for the bandpass filter.\nLower highpass = more IED sensitivity\nHigher lowpass = more noise included")
+        info_label.setStyleSheet("font-size: 11px; color: #666; margin: 10px 0;")
+        layout.addWidget(info_label)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(apply_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -125,6 +186,8 @@ class MainWindow(QMainWindow):
         self.filtered_line = None           # Line object for filtered signal
         self._current_candidate_idx = 0     # Current candidate being viewed
         self._candidate_list = []           # List of all candidates (preliminary + manual)
+        self._highpass_hz = 15.0            # Current highpass filter frequency
+        self._lowpass_hz = 200.0            # Current lowpass filter frequency
 
         self._build_ui()
         self.show_idle_screen()
@@ -153,7 +216,6 @@ class MainWindow(QMainWindow):
         for btn in [self.browse_btn, self.no_seizure_btn, self.seizure_mark_btn,
                     self.flag_btn, self.validate_btn, self.reject_btn, self.reset_btn,
                     self.undo_btn, self.done_btn, self.toggle_filtered_btn,
-                    self.prev_candidate_btn, self.next_candidate_btn,
                     self.toggle_candidates_btn, self.toggle_validated_btn, self.toggle_rejected_btn,
                     self.view_validated_btn]:
             btn.setStyleSheet(button_style)
@@ -192,8 +254,8 @@ class MainWindow(QMainWindow):
 
         # Y slider (vertical, to the right of plot, exact height match)
         self.y_slider = QScrollBar(Qt.Vertical)
-        self.y_slider.setMaximum(1000)
-        self.y_slider.setValue(500)
+        self.y_slider.setMaximum(5000)
+        self.y_slider.setValue(2500)
         self.y_slider.setFixedWidth(20)
         self.y_slider.sliderMoved.connect(self.on_y_slider)
         self.y_slider.setStyleSheet("""
@@ -268,21 +330,6 @@ class MainWindow(QMainWindow):
         """Build the bottom action buttons - much larger with keyboard shortcuts."""
         layout = QHBoxLayout()
         layout.setSpacing(6)
-
-        # Event navigation buttons (only visible during flagging)
-        self.prev_candidate_btn = QPushButton("◀ Prev\n")
-        self.prev_candidate_btn.setMinimumHeight(80)
-        self.prev_candidate_btn.setMinimumWidth(100)
-        self.prev_candidate_btn.clicked.connect(self.on_prev_candidate)
-        self.prev_candidate_btn.setVisible(False)
-        layout.addWidget(self.prev_candidate_btn)
-
-        self.next_candidate_btn = QPushButton("Next\n ▶")
-        self.next_candidate_btn.setMinimumHeight(80)
-        self.next_candidate_btn.setMinimumWidth(100)
-        self.next_candidate_btn.clicked.connect(self.on_next_candidate)
-        self.next_candidate_btn.setVisible(False)
-        layout.addWidget(self.next_candidate_btn)
 
         self.candidate_counter = QLabel("-- / --")
         self.candidate_counter.setStyleSheet("font-size: 12px; font-weight: bold; min-width: 60px;")
@@ -677,11 +724,11 @@ class MainWindow(QMainWindow):
         if self._full_ycenter is None or self.state not in (STATE_SEIZURE_MARKING, STATE_FLAGGING):
             return
 
-        # Map slider position (0-1000) to zoom level
-        # 500 = 1x zoom (full view)
+        # Map slider position (0-5000) to zoom level
+        # 2500 = 1x zoom (full view)
         # Lower = more zoom (tighter view)
         # Higher = less zoom (wider view, showing more noise)
-        fraction = value / 500.0  # 0 to 2
+        fraction = value / 2500.0  # 0 to 2
         if fraction < 0.1:
             fraction = 0.1  # Min zoom
 
@@ -710,7 +757,7 @@ class MainWindow(QMainWindow):
         if y_full_span > y_span:
             fraction = (y_full_span / (2 * y_span))
             self.y_slider.blockSignals(True)
-            self.y_slider.setValue(int(fraction * 500))
+            self.y_slider.setValue(int(fraction * 2500))
             self.y_slider.blockSignals(False)
 
     def _confirm_and_finish_seizure(self):
@@ -808,8 +855,6 @@ class MainWindow(QMainWindow):
         self.undo_btn.setVisible(True)
         self.done_btn.setVisible(True)
         self.toggle_filtered_btn.setVisible(True)
-        self.prev_candidate_btn.setVisible(True)
-        self.next_candidate_btn.setVisible(True)
         self.candidate_counter.setVisible(True)
         self.toggle_candidates_btn.setVisible(True)
         self.toggle_validated_btn.setVisible(True)
@@ -1477,26 +1522,59 @@ Help:
         self.canvas.draw_idle()
 
     def on_toggle_filtered(self, checked):
-        """Toggle filtered signal overlay without changing zoom."""
-        self._show_filtered = checked
+        """Toggle filtered signal and show bandpass filter dialog when enabling."""
+        if checked:
+            # Show bandpass filter dialog
+            dialog = BandpassFilterDialog(self, self._lowpass_hz if hasattr(self, '_lowpass_hz') else None)
+            if dialog.exec_() == QDialog.Accepted:
+                self._show_filtered = True
+                self._highpass_hz = float(dialog.highpass_spinbox.value())
+                self._lowpass_hz = float(dialog.lowpass_spinbox.value())
 
-        # Find and toggle signal lines by color
-        for line in self.ax.get_lines():
-            color = line.get_color()
-            # Raw signal is blue
-            if color == "#4c72b0":
-                line.set_visible(not self._show_filtered)
-            # Filtered signal is red
-            elif color == "#c44e52":
-                line.set_visible(self._show_filtered)
+                # Recalculate filtered signal with new parameters
+                if self.raw is not None:
+                    self.filtered = signal_processing.bandpass_filter(
+                        self.raw, self.recording.fs,
+                        highpass_hz=self._highpass_hz,
+                        lowpass_hz=self._lowpass_hz
+                    )
 
-        # Update button label with keyboard shortcut preserved
-        if self._show_filtered:
-            self.toggle_filtered_btn.setText("Hide\nFiltered [T]")
+                # Find and toggle signal lines by color
+                for line in self.ax.get_lines():
+                    color = line.get_color()
+                    # Raw signal is blue
+                    if color == "#4c72b0":
+                        line.set_visible(False)
+                    # Filtered signal is red
+                    elif color == "#5c2282":
+                        line.set_visible(True)
+                        line.set_ydata(self.filtered)
+
+                # Update button label
+                self.toggle_filtered_btn.setText("Hide\nFiltered [T]")
+                self.canvas.draw_idle()
+            else:
+                # User cancelled, uncheck the button
+                self.toggle_filtered_btn.blockSignals(True)
+                self.toggle_filtered_btn.setChecked(False)
+                self.toggle_filtered_btn.blockSignals(False)
         else:
-            self.toggle_filtered_btn.setText("Show\nFiltered [T]")
+            # Hide filtered signal
+            self._show_filtered = False
 
-        self.canvas.draw_idle()
+            # Find and toggle signal lines by color
+            for line in self.ax.get_lines():
+                color = line.get_color()
+                # Raw signal is blue
+                if color == "#4c72b0":
+                    line.set_visible(True)
+                # Filtered signal is red
+                elif color == "#c44e52":
+                    line.set_visible(False)
+
+            # Update button label
+            self.toggle_filtered_btn.setText("Show\nFiltered [T]")
+            self.canvas.draw_idle()
 
     def on_toggle_candidates_overlay(self, checked):
         """Toggle visibility of candidate event lines."""
