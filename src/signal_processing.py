@@ -7,7 +7,7 @@ FILTER_LOWPASS_HZ = 200.0
 FILTER_HIGHPASS_HZ = 15
 FILTER_ORDER = 4
 
-SNAP_HALF_WINDOW_S = 0.025
+SNAP_HALF_WINDOW_S = 0.0025
 
 
 def bandpass_filter(signal: np.ndarray, fs: float, highpass_hz: float = None, lowpass_hz: float = None) -> np.ndarray:

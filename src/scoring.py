@@ -4,10 +4,11 @@ Metrics:
 - TP: Validated events matched to algorithm events
 - FP: Algorithm events not matched to validated events
 - FN: Validated events not matched to algorithm events
-- TN: Rejected events not matched to algorithm events (correct rejections)
+- TN: No longer used (was for auto-detected candidates; now uses CSV imports)
+- FP_rejected: Rejected events (algorithm detected but user rejected them)
 
 Sensitivity = TP / (TP + FN)
-Specificity = TN / (TN + FP_rejected) where FP_rejected = rejected events with algorithm matches
+Specificity: No longer calculated (TN undefined with CSV-based candidates)
 """
 
 from dataclasses import dataclass, field
@@ -42,8 +43,8 @@ class ScoringResult:
 
     @property
     def specificity(self):
-        denom = self.tn + self.fp_rejected
-        return (self.tn / denom) if denom > 0 else None
+        # No longer meaningful with CSV-based candidates (TN is always 0)
+        return None
 
 
 def score_events(gt_times, algo_times, tolerance_s: float = MATCH_TOLERANCE_S, rejected_times=None) -> ScoringResult:
@@ -83,35 +84,15 @@ def score_events(gt_times, algo_times, tolerance_s: float = MATCH_TOLERANCE_S, r
     fn_times = [gt_times[i] for i in range(len(gt_times)) if i not in matched_gt]
     fp_times = [algo_times[i] for i in range(len(algo_times)) if i not in matched_algo]
 
-    # Count true negatives (rejected events not matched to algorithm)
-    # and false positives from rejected events (algorithm detected something rejected)
-    tn_count = 0
-    fp_rejected_count = 0
-
-    for ri, rejected_time in enumerate(rejected_times):
-        matched = False
-        for ai, algo_time in enumerate(algo_times):
-            if abs(rejected_time - algo_time) <= tolerance_s and ai in matched_algo:
-                # This rejected event was matched to an algo event (FP from algo perspective)
-                fp_rejected_count += 1
-                matched = True
-                break
-            elif abs(rejected_time - algo_time) <= tolerance_s and ai not in matched_algo:
-                # This rejected event has a nearby algo event but it's not matched yet
-                # Mark as matched to avoid double-counting
-                matched_algo.add(ai)
-                fp_rejected_count += 1
-                matched = True
-                break
-
-        if not matched:
-            # Rejected event with no nearby algorithm event (true negative)
-            tn_count += 1
+    # Count false positives from rejected events
+    # Since candidates now come from CSV (algo_events), all rejected events are FP
+    # TN is no longer meaningful (set to 0)
+    fp_rejected_count = len(rejected_times) if rejected_times else 0
 
     return ScoringResult(
         tp_pairs=tp_pairs,
         fn_times=fn_times,
         fp_times=fp_times,
-        tn=tn_count,
+        tn=0,  # No longer meaningful since candidates come from CSV
         fp_rejected=fp_rejected_count
     )

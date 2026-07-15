@@ -295,6 +295,7 @@ class MainWindow(QMainWindow):
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
         self.canvas.mpl_connect("scroll_event", self.on_scroll)
+        self.canvas.mpl_connect("key_press_event", self.on_canvas_key_press)
         self.ax.callbacks.connect("xlim_changed", self.on_xlim_changed)
 
         # Pool view buttons removed; using toggles instead
@@ -797,15 +798,14 @@ class MainWindow(QMainWindow):
         else:
             self.algo_events = self.algo_events_all
 
-        # Auto-detect preliminary events with stringent parameters
-        min_height = 5.0 * np.std(self.filtered)  # 5 SD
-        min_distance_s = 0.200  # 200ms
+        # Use CSV-imported events as preliminary candidates (instead of find_peaks)
+        self.preliminary_events = self.algo_events.copy()
 
-        self.preliminary_events = signal_processing.find_preliminary_events(
-            self.t, self.filtered, self.recording.fs,
-            min_height=min_height,
-            min_distance_s=min_distance_s
-        )
+        # Keep find_peaks code for reference (not used for candidates)
+        # min_height = 5.0 * np.std(self.filtered)  # 5 SD
+        # min_distance_s = 0.200  # 200ms
+        # find_preliminary_events(self.t, self.filtered, self.recording.fs,
+        #     min_height=min_height, min_distance_s=min_distance_s)
 
         self._enter_flagging()
 
@@ -871,7 +871,7 @@ class MainWindow(QMainWindow):
 
         # Store filtered line reference but only show if toggled
         self.filtered_line = self.ax.plot(
-            self.t, self.filtered, linewidth=0.6, color="#c44e52", alpha=0.8,
+            self.t, self.filtered, linewidth=0.6, color="#5c2282", alpha=0.8,
             label="Filtered (0 - 200 Hz)"
         )[0]
         self.filtered_line.set_visible(self._show_filtered)
@@ -898,8 +898,63 @@ class MainWindow(QMainWindow):
         # Set focus to canvas so keyboard events reach keyPressEvent
         self.canvas.setFocus()
 
+    def on_canvas_key_press(self, event):
+        """Handle key press events from matplotlib canvas."""
+        if self.state != STATE_FLAGGING:
+            return
+
+        key = event.key
+        handled = False
+
+        if key == 'v':
+            self.on_validate_selected()
+            handled = True
+        elif key == 'r':
+            self.on_reject_selected()
+            handled = True
+        elif key in ('up', 'down'):
+            if key == 'down':
+                self.on_next_candidate()
+            else:
+                self.on_prev_candidate()
+            handled = True
+        elif key == 'u':
+            self.on_undo()
+            handled = True
+        elif key == 'f':
+            self.flag_btn.setChecked(not self.flag_btn.isChecked())
+            handled = True
+        elif key == 'd':
+            self.on_done_clicked()
+            handled = True
+        elif key == '2':
+            self.on_view_validated_overlay()
+            handled = True
+        elif key == 'a':
+            self._zoom_fit_all()
+            handled = True
+        elif key == 's':
+            if self._candidate_list and self._current_candidate_idx < len(self._candidate_list):
+                self._zoom_to_event(self._candidate_list[self._current_candidate_idx])
+            handled = True
+        elif key == 't':
+            self.toggle_filtered_btn.setChecked(not self.toggle_filtered_btn.isChecked())
+            handled = True
+        elif key == 'h':
+            self._show_keyboard_help()
+            handled = True
+        elif key in ('[', ']'):
+            if key == '[':
+                self._scroll_x(-1)
+            else:
+                self._scroll_x(1)
+            handled = True
+
+        if handled:
+            event.canvas.draw_idle()
+
     def keyPressEvent(self, event):
-        """Handle keyboard shortcuts."""
+        """Handle keyboard shortcuts from Qt."""
         if self.state == STATE_FLAGGING:
             handled = False
 
@@ -996,6 +1051,7 @@ class MainWindow(QMainWindow):
                 self.selected_event = visible_candidates[0]
             else:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
+                self.canvas.setFocus()
                 return
 
         self._validate_preliminary_event(self.selected_event)
@@ -1015,6 +1071,7 @@ class MainWindow(QMainWindow):
                 self.selected_event = visible_candidates[0]
             else:
                 QMessageBox.warning(self, "No Selection", "Click on an event to select it first.")
+                self.canvas.setFocus()
                 return
 
         self._reject_preliminary_event(self.selected_event)
@@ -1244,6 +1301,7 @@ Help:
         """
         dlg = InstructionDialog(self, "Keyboard Shortcuts", help_text)
         dlg.exec_()
+        self.canvas.setFocus()
 
     def _auto_save_state(self):
         """Auto-save current validation state to JSON sidecar file."""
@@ -1545,7 +1603,7 @@ Help:
                     # Raw signal is blue
                     if color == "#4c72b0":
                         line.set_visible(False)
-                    # Filtered signal is red
+                    # Filtered signal is purple
                     elif color == "#5c2282":
                         line.set_visible(True)
                         line.set_ydata(self.filtered)
@@ -1558,6 +1616,9 @@ Help:
                 self.toggle_filtered_btn.blockSignals(True)
                 self.toggle_filtered_btn.setChecked(False)
                 self.toggle_filtered_btn.blockSignals(False)
+
+            # Restore focus to canvas for keyboard events
+            self.canvas.setFocus()
         else:
             # Hide filtered signal
             self._show_filtered = False
@@ -1568,13 +1629,16 @@ Help:
                 # Raw signal is blue
                 if color == "#4c72b0":
                     line.set_visible(True)
-                # Filtered signal is red
-                elif color == "#c44e52":
+                # Filtered signal is purple
+                elif color == "#5c2282":
                     line.set_visible(False)
 
             # Update button label
             self.toggle_filtered_btn.setText("Show\nFiltered [T]")
             self.canvas.draw_idle()
+
+            # Restore focus to canvas for keyboard events
+            self.canvas.setFocus()
 
     def on_toggle_candidates_overlay(self, checked):
         """Toggle visibility of candidate event lines."""
@@ -1595,6 +1659,7 @@ Help:
         """Open a separate window showing all validated events overlaid on same axis."""
         if not self.validated_events:
             QMessageBox.information(self, "No Validated Events", "No validated events to display yet.")
+            self.canvas.setFocus()
             return
 
         # Create a new window for the validated events overlay
@@ -1648,6 +1713,9 @@ Help:
         layout.addWidget(close_btn)
 
         overlay_window.exec_()
+
+        # Restore focus to canvas for keyboard events
+        self.canvas.setFocus()
 
     def on_next_candidate(self):
         """Jump to next preliminary candidate."""
@@ -1728,17 +1796,17 @@ Help:
         )
 
         sens_str = f"{result.sensitivity:.3f}" if result.sensitivity is not None else "N/A"
-        spec_str = f"{result.specificity:.3f}" if result.specificity is not None else "N/A"
 
         QMessageBox.information(
             self, "Analysis Results",
-            f"Ground truth (validated) events: {len(gt_times)}\n"
-            f"Rejected events: {len(rejected_times)}\n"
-            f"Algorithm events (pre-seizure): {len(self.algo_events)}\n\n"
-            f"TP: {result.tp}\nFP: {result.fp}\nFN: {result.fn}\n"
-            f"TN: {result.tn}\nFP (from rejected): {result.fp_rejected}\n\n"
-            f"Sensitivity: {sens_str}\n"
-            f"Specificity: {spec_str}",
+            f"Validated Events (Ground Truth): {len(gt_times)}\n"
+            f"Rejected Events: {len(rejected_times)}\n"
+            f"Algorithm Events (Pre-Seizure): {len(self.algo_events)}\n\n"
+            f"True Positives (TP): {result.tp}\n"
+            f"False Positives (FP): {result.fp}\n"
+            f"False Negatives (FN): {result.fn}\n"
+            f"Rejected Events (Algorithm Detections Rejected): {result.fp_rejected}\n\n"
+            f"Sensitivity (TP / (TP + FN)): {sens_str}",
         )
 
         closed_loop_analysis = closed_loop_feature_calc.ClosedLoopFeatureAnalysis(gt_times, self.recording, rejected_timestamps=rejected_times)
@@ -1751,10 +1819,11 @@ Help:
     def _save_to_workbook(self, result, gt_times):
         """Save results to Excel workbook."""
         dlg = QFileDialog(
-            self, "Select or create master workbook", "", "Excel Workbook (*.xlsx)"
+            self, "Save results to workbook", "", "Excel Workbook (*.xlsx)"
         )
         dlg.setFileMode(QFileDialog.AnyFile)
-        dlg.setAcceptMode(QFileDialog.AcceptOpen)
+        dlg.setAcceptMode(QFileDialog.AcceptSave)
+        dlg.setDefaultSuffix("xlsx")
         if dlg.exec_() != QDialog.Accepted:
             return
         selected = dlg.selectedFiles()
