@@ -44,7 +44,16 @@ def sheet_name_for(result: FileResult) -> str:
 def open_or_create_workbook(path: str) -> Workbook:
     if os.path.exists(path):
         try:
-            return load_workbook(path)
+            wb = load_workbook(path)
+            # Ensure workbook has sheets
+            if not wb.sheetnames:
+                # Empty workbook, add summary sheet
+                ws = wb.active
+                ws.title = SUMMARY_SHEET_NAME
+            elif SUMMARY_SHEET_NAME not in wb.sheetnames:
+                # Workbook exists but has no summary sheet, create one
+                ws = wb.create_sheet(title=SUMMARY_SHEET_NAME, index=0)
+            return wb
         except Exception as e:
             # File exists but is corrupted or not a valid xlsx file
             raise ValueError(
@@ -53,6 +62,7 @@ def open_or_create_workbook(path: str) -> Workbook:
                 f"Please select a different file or create a new one."
             ) from e
 
+    # Create new workbook with summary sheet
     wb = Workbook()
     default_sheet = wb.active
     default_sheet.title = SUMMARY_SHEET_NAME
@@ -103,11 +113,13 @@ def write_file_sheet(wb: Workbook, result: FileResult) -> str:
 
 
 def update_summary_sheet(wb: Workbook) -> None:
+    # Get all data sheet names BEFORE modifying summary sheet
+    recording_names = [n for n in wb.sheetnames if n != SUMMARY_SHEET_NAME]
+
+    # Delete and recreate summary sheet
     if SUMMARY_SHEET_NAME in wb.sheetnames:
         del wb[SUMMARY_SHEET_NAME]
     ws = wb.create_sheet(title=SUMMARY_SHEET_NAME, index=0)
-
-    recording_names = [n for n in wb.sheetnames if n != SUMMARY_SHEET_NAME]
 
     total_tp = total_fp = total_fn = total_fp_rejected = 0
     per_recording = []

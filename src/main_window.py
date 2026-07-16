@@ -624,7 +624,7 @@ class MainWindow(QMainWindow):
 
         self._dragging = True
         self._temp_line = self.ax.axvline(
-            event.xdata, color=PRELIMINARY_EVENT_COLOR, linestyle=":", linewidth=1.5, animated=True
+            event.xdata, color=PRELIMINARY_EVENT_COLOR, linestyle=":", linewidth=5.0, animated=True
         )
         self.canvas.draw()
         self._blit_bg = self.canvas.copy_from_bbox(self.ax.bbox)
@@ -1131,7 +1131,7 @@ class MainWindow(QMainWindow):
         """Add a manually flagged event - automatically validated."""
         if t_flag not in self.validated_events and t_flag not in self.rejected_events:
             # Create line in green (validated) since manually flagged events are auto-validated
-            line = self.ax.axvline(t_flag, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=1.5)
+            line = self.ax.axvline(t_flag, color=VALIDATED_EVENT_COLOR, linestyle="--", linewidth=5.0)
             self.preliminary_flags[t_flag] = line
             self.manually_flagged_events.add(t_flag)
             # Automatically add to validated events
@@ -1412,7 +1412,7 @@ Help:
         # Add candidates (orange) if toggle is on
         if self.show_candidate_lines:
             for event_time in sorted(self._get_candidates()):
-                line = self.ax.axvline(event_time, color=PRELIMINARY_EVENT_COLOR, linestyle="--", linewidth=1.5)
+                line = self.ax.axvline(event_time, color=PRELIMINARY_EVENT_COLOR, linestyle="--", linewidth=5.0)
                 self.preliminary_flags[event_time] = line
 
         # Add validated (green) if toggle is on
